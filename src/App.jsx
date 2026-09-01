@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
-  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays,
+  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -1016,6 +1016,56 @@ function IssuesTab({ issues, setIssues }) {
 }
 
 /* ---------------------------------------------------------------------- */
+/*  Audit log tab (owner only)                                             */
+/* ---------------------------------------------------------------------- */
+function AuditLogTab() {
+  const [entries, setEntries] = useState(null);
+
+  useEffect(() => {
+    import("./lib/supabaseClient").then(({ supabase }) => {
+      supabase
+        .from("audit_log")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200)
+        .then(({ data }) => setEntries(data || []));
+    });
+  }, []);
+
+  const actionLabel = {
+    login: "Signed in",
+    logout: "Signed out",
+    data_saved: "Updated data",
+  };
+
+  return (
+    <div>
+      <SectionHeader icon={ShieldCheck} title="Audit log" subtitle="Every login and data change, most recent first — visible to the owner only" />
+      {entries === null && <p style={{ color: C.concrete }} className="text-sm italic">Loading…</p>}
+      {entries?.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">Nothing logged yet.</p>}
+      <div className="space-y-2">
+        {entries?.map((e) => (
+          <div key={e.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="text-sm font-semibold uppercase">
+                {actionLabel[e.action] || e.action}
+              </span>
+              <span style={{ color: C.concrete }} className="text-xs ml-2">{e.user_email}</span>
+              {e.details?.key && (
+                <span style={{ color: C.concrete }} className="text-xs ml-2">· {e.details.key}</span>
+              )}
+            </div>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">
+              {new Date(e.created_at).toLocaleString()}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
 /*  App shell                                                               */
 /* ---------------------------------------------------------------------- */
 const TABS = [
@@ -1029,8 +1079,9 @@ const TABS = [
   { key: "documents", label: "Documents", icon: FileText },
   { key: "issues", label: "Issues", icon: AlertTriangle },
 ];
+const OWNER_TABS = [{ key: "audit", label: "Audit Log", icon: ShieldCheck }];
 
-export default function App() {
+export default function App({ currentUser, onSignOut }) {
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
 
@@ -1086,9 +1137,24 @@ export default function App() {
               {meta.projectName || "Site Ledger"}
             </span>
             <span style={{ color: "#9FB4C7" }} className="text-xs ml-1">Bengaluru build tracker</span>
+            <div className="ml-auto flex items-center gap-3">
+              {currentUser && (
+                <span style={{ color: "#B9C7D4" }} className="text-xs hidden sm:inline">
+                  {currentUser.name || currentUser.email}
+                  {currentUser.role === "owner" && (
+                    <span style={{ color: C.yellow }} className="ml-1 font-semibold uppercase">· Owner</span>
+                  )}
+                </span>
+              )}
+              {onSignOut && (
+                <button onClick={onSignOut} style={{ color: "#B9C7D4" }} className="flex items-center gap-1 text-xs">
+                  <LogOut size={14} /> Sign out
+                </button>
+              )}
+            </div>
           </div>
           <nav className="flex gap-1 overflow-x-auto pb-0 -mb-px">
-            {TABS.map((t) => {
+            {[...TABS, ...(currentUser?.role === "owner" ? OWNER_TABS : [])].map((t) => {
               const Icon = t.icon;
               const active = tab === t.key;
               return (
@@ -1127,10 +1193,11 @@ export default function App() {
         {tab === "products" && <ProductsTab products={products} setProducts={setProducts} />}
         {tab === "documents" && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
         {tab === "issues" && <IssuesTab issues={issues} setIssues={setIssues} />}
+        {tab === "audit" && currentUser?.role === "owner" && <AuditLogTab />}
       </main>
 
       <footer style={{ color: C.concrete }} className="text-center text-xs py-6">
-        Everything is saved privately to your account, on this device's app storage.
+        Signed in as {currentUser?.email} — data is shared with everyone invited to this project.
       </footer>
     </div>
   );

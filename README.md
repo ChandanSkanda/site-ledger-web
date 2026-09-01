@@ -48,25 +48,42 @@ If you'd rather not use Vercel, `api/ai.js` is a plain proxy — port the
 same logic into any Node/Express server or another provider's serverless
 functions; nothing else in the app needs to change.
 
-## Phase 3 — sync data between you and your brother
+## Phase 3 — login, roles, and shared data (done)
 
-Right now data lives in one browser's `localStorage`, so it won't show up
-on his phone. When you're ready:
+The app now requires signing in, has an owner/member role, and logs every
+login and data change to an audit trail. Here's how to set it up:
 
-1. Create a free Supabase project.
-2. Run `supabase/schema.sql` in its SQL editor.
-3. Add Supabase auth (email/password or magic link is enough for two
-   users) and a `project_id` you both belong to.
-4. Rewrite `loadKey`/`saveKey` in `src/lib/storage.js` to read/write the
-   `records` table instead of `localStorage`, filtered by `project_id`
-   and `collection`. Nothing in `App.jsx` needs to change — every screen
-   only calls those two functions.
-5. Move gallery photos from base64-in-JSON to Supabase Storage, and save
-   the storage path in the record instead.
+1. **Create a free Supabase project** at supabase.com.
+2. **Run the schema** — open the SQL Editor in your Supabase project,
+   paste in the contents of `supabase/schema.sql`, and run it. This
+   creates the `profiles`, `kv_store`, and `audit_log` tables.
+3. **Get your API keys** — Project Settings → API → copy the "Project
+   URL" and the "anon public" key.
+4. **Set environment variables**:
+   - Locally: copy `.env.example` to `.env` and fill in the two values.
+   - On Vercel: Settings → Environment Variables → add
+     `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` the same way you
+     added `ANTHROPIC_API_KEY` earlier, then redeploy.
+5. **Create the two logins** — there's no public sign-up page on purpose,
+   so you control exactly who can get in:
+   - In Supabase: **Authentication → Users → Add user** — create one for
+     yourself and one for your brother (email + password each).
+   - In **Table Editor → profiles**, add one row per person:
+     `id` = their user ID (copy it from the Users list), `email`, `name`,
+     and `role` = `owner` for whichever of you should see the Audit Log
+     tab, `member` for the other.
+6. `npm install` again (adds the Supabase client library), then
+   `npm run dev` — you should now see a login screen instead of the app
+   loading straight away.
 
-This is the point where "single user" naturally becomes "a small team",
-if you ever do make it generic for other homeowners later — each house
-becomes its own `project_id`.
+Once this is done, both of you sign in with your own accounts, see the
+exact same live data, and every change either of you makes is stamped
+with who did it in the new **Audit Log** tab (owner-only).
+
+Photos are still stored as base64 inside `kv_store` for now — fine for
+a handful of photos, but for a lot of daily site photos you'll want to
+move them to Supabase Storage instead (create a `gallery` bucket and
+store the file path rather than the raw image data).
 
 ## Phase 4 — package it as an Android app
 
@@ -107,8 +124,9 @@ APIs (camera, contacts-dialer, storage) as needed.
    progress, expenses, and contacts. See what's missing.
 2. Deploy (Phase 2) so the AI features work and you can use it from your
    phone's browser on-site.
-3. Add Supabase sync (Phase 3) once you and your brother are both
-   actively using it.
+3. Set up Supabase (Phase 3) so you and your brother share one login-
+   protected, synced copy of the data — do this before Phase 4, since
+   testing accounts is much faster on the web.
 4. Wrap it for Android (Phase 4) once the web version feels done — this
    is deliberately last, since every change is still free and instant on
    the web, but slower to test once it's a compiled native app.
