@@ -336,7 +336,8 @@ function Dashboard({ data, setTab, currentUser }) {
   const latestStage = progress[0]?.stage || "Not started";
 
   const stageOrder = STAGES.filter((s) => s !== "Other");
-  const reachedStages = new Set(progress.map((p) => p.stage));
+  const completedStages = new Set(meta.completedStages || []);
+  const loggedStages = new Set(progress.map((p) => p.stage));
 
   const stat = (label, value, tone, Icon) => (
     <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 flex items-center gap-3">
@@ -367,35 +368,43 @@ function Dashboard({ data, setTab, currentUser }) {
 
       {/* Stage ledger — signature element */}
       <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-5 mb-8">
-        <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-4">
-          Construction sequence
-        </h3>
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide">
+            Construction sequence
+          </h3>
+          <div className="flex items-center gap-3 text-xs" style={{ color: C.concrete }}>
+            <span className="flex items-center gap-1"><span style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, display: "inline-block" }} /> Completed</span>
+            <span className="flex items-center gap-1"><span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${C.rust}`, display: "inline-block" }} /> In progress</span>
+          </div>
+        </div>
         <div className="relative pl-1 overflow-x-auto">
           <div className="flex items-start" style={{ minWidth: "760px" }}>
             {stageOrder.map((s, i) => {
-              const done = reachedStages.has(s);
+              const done = completedStages.has(s);
+              const inProgress = !done && loggedStages.has(s);
+              const lineActive = done; // the connecting line only fills once a stage is actually marked complete
               return (
                 <div key={s} className="flex-1 flex flex-col items-center relative">
                   {i !== 0 && (
                     <div
                       style={{
                         position: "absolute", top: "11px", right: "50%", height: "2px", width: "100%",
-                        background: done ? C.rust : C.line,
-                        backgroundImage: done ? "none" : `repeating-linear-gradient(90deg, ${C.line} 0 6px, transparent 6px 12px)`,
+                        background: lineActive ? C.green : C.line,
+                        backgroundImage: lineActive ? "none" : `repeating-linear-gradient(90deg, ${C.line} 0 6px, transparent 6px 12px)`,
                       }}
                     />
                   )}
                   <div
                     style={{
                       width: 22, height: 22, borderRadius: "50%", zIndex: 1,
-                      background: done ? C.rust : "#fff",
-                      border: `2px solid ${done ? C.rust : C.concrete}`,
+                      background: done ? C.green : "#fff",
+                      border: `2px solid ${done ? C.green : inProgress ? C.rust : C.concrete}`,
                     }}
                   />
                   <div
                     style={{
                       fontFamily: "'IBM Plex Mono', monospace",
-                      color: done ? C.ink : C.concrete,
+                      color: done || inProgress ? C.ink : C.concrete,
                       fontSize: "10.5px",
                       textAlign: "center",
                       marginTop: 6,
@@ -447,9 +456,20 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
   const [checking, setChecking] = useState(false);
   const [review, setReview] = useState("");
+  const completedStages = new Set(meta.completedStages || []);
+  const loggedStages = new Set(progress.map((p) => p.stage));
 
   const savePlan = async () => {
     const next = { ...meta, planText: planDraft };
+    setMeta(next);
+    await saveKey("meta", next);
+  };
+
+  const toggleStageComplete = async (stage) => {
+    const current = new Set(meta.completedStages || []);
+    if (current.has(stage)) current.delete(stage);
+    else current.add(stage);
+    const next = { ...meta, completedStages: Array.from(current) };
     setMeta(next);
     await saveKey("meta", next);
   };
@@ -475,6 +495,36 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
 
   return (
     <div>
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
+        <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
+          Stage completion
+        </h3>
+        <p style={{ color: C.concrete }} className="text-xs mb-3">
+          Logging progress on a stage doesn't mark it done by itself — a stage can take several visits. Tick it off here once it's actually finished; that's what fills in green on the dashboard.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {STAGES.filter((s) => s !== "Other").map((s) => {
+            const done = completedStages.has(s);
+            const inProgress = !done && loggedStages.has(s);
+            return (
+              <button
+                key={s}
+                onClick={() => toggleStageComplete(s)}
+                style={{
+                  border: `1.5px solid ${done ? C.green : inProgress ? C.rust : C.line}`,
+                  background: done ? C.green : "#fff",
+                  color: done ? "#fff" : C.ink,
+                }}
+                className="text-xs font-semibold px-3 py-1.5 rounded-full flex items-center gap-1.5"
+              >
+                {done && <CheckCircle2 size={13} />}
+                {s}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
           Building plan &amp; schedule
@@ -1156,7 +1206,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
 
-  const [meta, setMeta] = useState({ projectName: "Site Ledger", budgetAllocated: "", planText: "" });
+  const [meta, setMeta] = useState({ projectName: "Site Ledger", budgetAllocated: "", planText: "", completedStages: [] });
   const [progress, setProgress] = useState([]);
   const [gallery, setGallery] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -1170,7 +1220,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   useEffect(() => {
     (async () => {
       const [m, p, g, e, perm, c, prod, doc, iss, l] = await Promise.all([
-        loadKey("meta", { projectName: "Site Ledger", budgetAllocated: "", planText: "" }),
+        loadKey("meta", { projectName: "Site Ledger", budgetAllocated: "", planText: "", completedStages: [] }),
         loadKey("progress", []),
         loadKey("gallery", []),
         loadKey("expenses", []),
