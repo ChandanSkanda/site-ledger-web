@@ -342,6 +342,7 @@ export default function AuthGate() {
       setName(profile?.name || session.user.email);
       const rows = await fetchMemberships(session.user.id);
       if (rows.length === 1) {
+        setActiveProject(rows[0].project_id, rows[0].projects);
         setActiveMembership(rows[0]);
       }
     })();
@@ -394,7 +395,9 @@ export default function AuthGate() {
         onReady={async (projectId, role, meta) => {
           const rows = await fetchMemberships(session.user.id);
           const picked = projectId ? rows.find((r) => r.project_id === projectId) : rows[rows.length - 1];
-          setActiveMembership(picked || { project_id: projectId, role, projects: meta });
+          const finalMembership = picked || { project_id: projectId, role, projects: meta };
+          setActiveProject(finalMembership.project_id, finalMembership.projects);
+          setActiveMembership(finalMembership);
           setShowSelector(false);
         }}
       />
@@ -406,6 +409,7 @@ export default function AuthGate() {
       <ProjectSelector
         memberships={memberships}
         onSelect={(m) => {
+          setActiveProject(m.project_id, m.projects);
           setActiveMembership(m);
           setShowSelector(false);
         }}
