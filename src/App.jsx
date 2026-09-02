@@ -1272,7 +1272,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
               )}
               {onSwitchProject && (
                 <button onClick={onSwitchProject} style={{ color: "#B9C7D4" }} className="flex items-center gap-1 text-xs">
-                  <Repeat size={14} /> Switch project
+                  <Repeat size={14} /> Projects
                 </button>
               )}
               {onSignOut && (

@@ -438,7 +438,7 @@ export default function AuthGate() {
         projectType: activeMembership.projects?.type,
       }}
       onSignOut={signOut}
-      onSwitchProject={memberships.length > 1 ? switchProject : undefined}
+      onSwitchProject={switchProject}
     />
   );
 }
