@@ -2,10 +2,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
-  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut,
+  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
+import { ROLE_LABELS, ROLE_TAB_ACCESS, ALL_ROLES } from "./lib/roles";
+import { getActiveProjectId } from "./lib/activeProject";
 
 /* ---------------------------------------------------------------------- */
 /*  Design tokens                                                          */
@@ -321,7 +323,7 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
 /* ---------------------------------------------------------------------- */
 /*  Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
-function Dashboard({ data, setTab }) {
+function Dashboard({ data, setTab, currentUser }) {
   const { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan } = data;
 
   const spentOnExpenses = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
@@ -350,7 +352,11 @@ function Dashboard({ data, setTab }) {
 
   return (
     <div>
-      <SectionHeader icon={Home} title={meta.projectName || "Site Ledger"} subtitle="Bengaluru · construction dashboard" />
+      <SectionHeader
+        icon={Home}
+        title={currentUser?.projectName || meta.projectName || "Site Ledger"}
+        subtitle={[currentUser?.projectType, currentUser?.projectPlace].filter(Boolean).join(" · ") || "Construction dashboard"}
+      />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-8">
         {stat("Total spent", fmtINR(totalSpent), C.rust, IndianRupee)}
@@ -1016,6 +1022,63 @@ function IssuesTab({ issues, setIssues }) {
 }
 
 /* ---------------------------------------------------------------------- */
+/*  Team tab (owner only) — add members, promote to owner                  */
+/* ---------------------------------------------------------------------- */
+function TeamTab({ currentUserEmail }) {
+  const [members, setMembers] = useState(null);
+  const [savingId, setSavingId] = useState(null);
+
+  const load = async () => {
+    const { supabase } = await import("./lib/supabaseClient");
+    const projectId = getActiveProjectId();
+    const { data } = await supabase
+      .from("project_members")
+      .select("user_id, role, joined_at, profiles(name, email)")
+      .eq("project_id", projectId)
+      .order("joined_at", { ascending: true });
+    setMembers(data || []);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const changeRole = async (userId, role) => {
+    setSavingId(userId);
+    const { supabase } = await import("./lib/supabaseClient");
+    const { logAudit } = await import("./lib/audit");
+    const projectId = getActiveProjectId();
+    await supabase.from("project_members").update({ role }).eq("project_id", projectId).eq("user_id", userId);
+    await logAudit("role_changed", { user_id: userId, new_role: role });
+    await load();
+    setSavingId(null);
+  };
+
+  return (
+    <div>
+      <SectionHeader icon={UserCog} title="Team" subtitle="Everyone on this project — promote anyone to owner here" />
+      {members === null && <p style={{ color: C.concrete }} className="text-sm italic">Loading…</p>}
+      <div className="space-y-2">
+        {members?.map((m) => (
+          <div key={m.user_id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm">{m.profiles?.name || m.profiles?.email}</div>
+              <div style={{ color: C.concrete }} className="text-xs">{m.profiles?.email}{m.profiles?.email === currentUserEmail && " · you"}</div>
+            </div>
+            <select
+              style={{ ...inputStyle, width: "auto" }}
+              value={m.role}
+              disabled={savingId === m.user_id}
+              onChange={(e) => changeRole(m.user_id, e.target.value)}
+            >
+              {ALL_ROLES.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
 /*  Audit log tab (owner only)                                             */
 /* ---------------------------------------------------------------------- */
 function AuditLogTab() {
@@ -1023,9 +1086,11 @@ function AuditLogTab() {
 
   useEffect(() => {
     import("./lib/supabaseClient").then(({ supabase }) => {
+      const projectId = getActiveProjectId();
       supabase
         .from("audit_log")
         .select("*")
+        .eq("project_id", projectId)
         .order("created_at", { ascending: false })
         .limit(200)
         .then(({ data }) => setEntries(data || []));
@@ -1036,6 +1101,9 @@ function AuditLogTab() {
     login: "Signed in",
     logout: "Signed out",
     data_saved: "Updated data",
+    project_created: "Created the project",
+    project_joined: "Joined the project",
+    role_changed: "Changed a role",
   };
 
   return (
@@ -1079,7 +1147,10 @@ const TABS = [
   { key: "documents", label: "Documents", icon: FileText },
   { key: "issues", label: "Issues", icon: AlertTriangle },
 ];
-const OWNER_TABS = [{ key: "audit", label: "Audit Log", icon: ShieldCheck }];
+const OWNER_TABS = [
+  { key: "team", label: "Team", icon: UserCog },
+  { key: "audit", label: "Audit Log", icon: ShieldCheck },
+];
 
 export default function App({ currentUser, onSignOut }) {
   const [tab, setTab] = useState("dashboard");
@@ -1125,6 +1196,7 @@ export default function App({ currentUser, onSignOut }) {
   }
 
   const data = { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan };
+  const canSee = (tabKey) => (ROLE_TAB_ACCESS[currentUser?.role] || ROLE_TAB_ACCESS.other).includes(tabKey);
 
   return (
     <div style={{ background: C.paper, minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
@@ -1134,16 +1206,18 @@ export default function App({ currentUser, onSignOut }) {
           <div className="flex items-center gap-2 mb-3">
             <Hammer size={22} style={{ color: C.yellow }} />
             <span style={{ fontFamily: "'Oswald', sans-serif" }} className="text-lg font-semibold tracking-wide uppercase">
-              {meta.projectName || "Site Ledger"}
+              {currentUser?.projectName || "Site Ledger"}
             </span>
-            <span style={{ color: "#9FB4C7" }} className="text-xs ml-1">Bengaluru build tracker</span>
+            <span style={{ color: "#9FB4C7" }} className="text-xs ml-1">
+              {[currentUser?.projectType, currentUser?.projectPlace].filter(Boolean).join(" · ") || "Build tracker"}
+            </span>
             <div className="ml-auto flex items-center gap-3">
               {currentUser && (
                 <span style={{ color: "#B9C7D4" }} className="text-xs hidden sm:inline">
                   {currentUser.name || currentUser.email}
-                  {currentUser.role === "owner" && (
-                    <span style={{ color: C.yellow }} className="ml-1 font-semibold uppercase">· Owner</span>
-                  )}
+                  <span style={{ color: C.yellow }} className="ml-1 font-semibold uppercase">
+                    · {ROLE_LABELS[currentUser.role] || currentUser.role}
+                  </span>
                 </span>
               )}
               {onSignOut && (
@@ -1154,7 +1228,7 @@ export default function App({ currentUser, onSignOut }) {
             </div>
           </div>
           <nav className="flex gap-1 overflow-x-auto pb-0 -mb-px">
-            {[...TABS, ...(currentUser?.role === "owner" ? OWNER_TABS : [])].map((t) => {
+            {[...TABS.filter((t) => (ROLE_TAB_ACCESS[currentUser?.role] || ROLE_TAB_ACCESS.other).includes(t.key)), ...(currentUser?.role === "owner" ? OWNER_TABS : [])].map((t) => {
               const Icon = t.icon;
               const active = tab === t.key;
               return (
@@ -1178,21 +1252,22 @@ export default function App({ currentUser, onSignOut }) {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6">
-        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} />}
+        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} />}
         {tab === "progress" && <ProgressTab progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta} />}
         {tab === "gallery" && <GalleryTab gallery={gallery} setGallery={setGallery} />}
-        {tab === "budget" && (
+        {tab === "budget" && canSee("budget") && (
           <BudgetTab
             expenses={expenses} setExpenses={setExpenses}
             permissions={permissions} meta={meta} setMeta={setMeta}
             loan={loan} setLoan={setLoan}
           />
         )}
-        {tab === "permissions" && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
-        {tab === "people" && <PeopleTab contacts={contacts} setContacts={setContacts} />}
-        {tab === "products" && <ProductsTab products={products} setProducts={setProducts} />}
-        {tab === "documents" && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
+        {tab === "permissions" && canSee("permissions") && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
+        {tab === "people" && canSee("people") && <PeopleTab contacts={contacts} setContacts={setContacts} />}
+        {tab === "products" && canSee("products") && <ProductsTab products={products} setProducts={setProducts} />}
+        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
         {tab === "issues" && <IssuesTab issues={issues} setIssues={setIssues} />}
+        {tab === "team" && currentUser?.role === "owner" && <TeamTab currentUserEmail={currentUser.email} />}
         {tab === "audit" && currentUser?.role === "owner" && <AuditLogTab />}
       </main>
 

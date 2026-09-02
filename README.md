@@ -48,37 +48,74 @@ If you'd rather not use Vercel, `api/ai.js` is a plain proxy — port the
 same logic into any Node/Express server or another provider's serverless
 functions; nothing else in the app needs to change.
 
-## Phase 3 — login, roles, and shared data (done)
+## Phase 3 — accounts, projects, and multiple owners (done)
 
-The app now requires signing in, has an owner/member role, and logs every
-login and data change to an audit trail. Here's how to set it up:
+The app now supports real accounts, and ownership is tied to **creating a
+project** rather than "whoever signs up first." Here's the model:
+
+- Anyone can sign up (name, email, password) — that just creates an
+  account, nothing more.
+- After signing up/in, you either **create a project** (give it a name,
+  place, and type — e.g. "Whitefield house", "Bangalore", "House
+  construction") or **join one** with an invite code someone gives you.
+- **Whoever creates a project is automatically its owner.**
+- Everyone who joins with a code picks a field role at that point
+  (Builder, Carpenter, Civil Engineer, Electrician, Plumber, etc.) — never
+  "Owner". Nobody can grant themselves ownership.
+- **Promoting someone to co-owner (your brother, a spouse, etc.) happens
+  on the owner-only Team tab** — pick their name, change their role
+  dropdown to "Owner." That's the "opt him in as owner" flow you asked
+  for.
+
+### Setup
 
 1. **Create a free Supabase project** at supabase.com.
-2. **Run the schema** — open the SQL Editor in your Supabase project,
-   paste in the contents of `supabase/schema.sql`, and run it. This
-   creates the `profiles`, `kv_store`, and `audit_log` tables.
-3. **Get your API keys** — Project Settings → API → copy the "Project
-   URL" and the "anon public" key.
-4. **Set environment variables**:
-   - Locally: copy `.env.example` to `.env` and fill in the two values.
-   - On Vercel: Settings → Environment Variables → add
-     `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` the same way you
-     added `ANTHROPIC_API_KEY` earlier, then redeploy.
-5. **Create the two logins** — there's no public sign-up page on purpose,
-   so you control exactly who can get in:
-   - In Supabase: **Authentication → Users → Add user** — create one for
-     yourself and one for your brother (email + password each).
-   - In **Table Editor → profiles**, add one row per person:
-     `id` = their user ID (copy it from the Users list), `email`, `name`,
-     and `role` = `owner` for whichever of you should see the Audit Log
-     tab, `member` for the other.
-6. `npm install` again (adds the Supabase client library), then
-   `npm run dev` — you should now see a login screen instead of the app
-   loading straight away.
+2. **Run the schema** — SQL Editor → paste in `supabase/schema.sql` → Run.
+   (If you'd already run an older version of this file from before, the
+   comment at the top of the file has a one-line command to drop the old
+   tables first — safe, since there's no real data yet.)
+3. **Get your API keys** — Project Settings → API → copy the Project URL
+   and the "anon public" key.
+4. **Set environment variables** — locally in `.env` (copy from
+   `.env.example`), and in Vercel (Settings → Environment Variables, same
+   way as `ANTHROPIC_API_KEY`), then redeploy.
+5. `npm install` (pulls in the Supabase client library), then
+   `npm run dev` or visit your deployed URL.
+6. **Sign up, then create your project first** — you become its owner.
+   You'll be shown a 6-character invite code — save it.
+7. **Give the invite code to your brother.** He signs up, chooses "Join a
+   project," enters the code, and picks a role (any field role — it
+   doesn't matter which, since you'll change it next).
+8. **Go to the Team tab** (owner-only) and change his role to **Owner**.
 
-Once this is done, both of you sign in with your own accounts, see the
-exact same live data, and every change either of you makes is stamped
-with who did it in the new **Audit Log** tab (owner-only).
+From here, both of you see the same live data, and the Audit Log records
+every login, join, role change, and data edit with who and when.
+
+### What each role can see
+
+- **Owner** and **Builder / site admin**: everything, including Budget,
+  Permissions, Documents. Owner alone sees Team and Audit Log.
+- **Builder**: adds People and Products to the shared basics.
+- **Civil engineer**: adds People.
+- **Carpenter, electrician, plumber, other**: Dashboard, Progress,
+  Gallery, Issues only — enough to log their own work.
+
+**Two honest limitations worth knowing:**
+- This role split currently only hides tabs in the app's interface — it
+  isn't yet enforced at the database level for the app's actual project
+  data (kv_store/audit_log). A technically savvy team member could
+  theoretically still read budget data by calling Supabase directly.
+  Reasonable for a small trusted team; would need real per-role database
+  policies before handing this to strangers as a generic product.
+- Anyone signed in can look up a project's name/place/type if they
+  somehow guess or obtain its invite code — the code itself is the real
+  protection (it's random and only shared with people you choose to tell)
+  rather than a fully private project list.
+
+Photos are still stored as base64 inside `kv_store` for now — fine for a
+handful of photos, but for a lot of daily site photos, move them to
+Supabase Storage instead (create a `gallery` bucket and store the file
+path rather than the raw image data).
 
 Photos are still stored as base64 inside `kv_store` for now — fine for
 a handful of photos, but for a lot of daily site photos you'll want to
