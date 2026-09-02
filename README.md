@@ -91,7 +91,14 @@ project** rather than "whoever signs up first." Here's the model:
 From here, both of you see the same live data, and the Audit Log records
 every login, join, role change, and data edit with who and when.
 
-### What each role can see
+### Multiple projects
+
+If someone belongs to only one project, they land straight on its
+dashboard — no extra screen. If they belong to more than one (say, a
+civil engineer working across two different houses, or you starting a
+second property later), they see a project picker after logging in, and
+a **"Switch project"** link appears in the header at any time to jump
+between them without signing out.
 
 - **Owner** and **Builder / site admin**: everything, including Budget,
   Permissions, Documents. Owner alone sees Team and Audit Log.

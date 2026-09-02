@@ -278,12 +278,45 @@ function ProjectGate({ userId, onReady }) {
   );
 }
 
+/* ---------------- Choose between multiple projects ---------------- */
+
+function ProjectSelector({ memberships, onSelect, onCreateOrJoinAnother }) {
+  return (
+    <AuthCard wide>
+      <p style={{ color: C.ink }} className="text-sm font-semibold mb-3">Choose a project</p>
+      <div className="space-y-2 mb-4">
+        {memberships.map((m) => (
+          <button
+            key={m.project_id}
+            onClick={() => onSelect(m)}
+            style={{ background: C.paper, border: `1px solid ${C.line}`, textAlign: "left" }}
+            className="w-full rounded-md px-4 py-3 flex items-center justify-between hover:opacity-80"
+          >
+            <div>
+              <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm">{m.projects?.name}</div>
+              <div style={{ color: C.concrete }} className="text-xs">
+                {[m.projects?.type, m.projects?.place].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            <span style={{ color: C.rust }} className="text-xs font-semibold uppercase">{m.role}</span>
+          </button>
+        ))}
+      </div>
+      <button onClick={onCreateOrJoinAnother} style={{ color: C.rust }} className="text-xs font-semibold block mx-auto">
+        + Create or join another project
+      </button>
+    </AuthCard>
+  );
+}
+
 /* ---------------- Top-level gate ---------------- */
 
 export default function AuthGate() {
   const [session, setSession] = useState(undefined); // undefined = loading, null = signed out
   const [mode, setMode] = useState("signin");
-  const [membership, setMembership] = useState(undefined); // undefined = loading, null = none yet, {} = ready
+  const [memberships, setMemberships] = useState(undefined); // undefined = loading, [] = none yet
+  const [activeMembership, setActiveMembership] = useState(null);
+  const [showSelector, setShowSelector] = useState(false);
   const [name, setName] = useState("");
 
   useEffect(() => {
@@ -292,34 +325,42 @@ export default function AuthGate() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  const fetchMemberships = async (userId) => {
+    const { data: rows } = await supabase
+      .from("project_members")
+      .select("project_id, role, projects(name, place, type)")
+      .eq("user_id", userId)
+      .order("joined_at", { ascending: true });
+    setMemberships(rows || []);
+    return rows || [];
+  };
+
   useEffect(() => {
     if (!session?.user) return;
     (async () => {
       const { data: profile } = await supabase.from("profiles").select("name").eq("id", session.user.id).maybeSingle();
       setName(profile?.name || session.user.email);
-
-      const { data: rows } = await supabase
-        .from("project_members")
-        .select("project_id, role, projects(name, place, type)")
-        .eq("user_id", session.user.id)
-        .order("joined_at", { ascending: true })
-        .limit(1);
-
-      if (rows && rows.length > 0) {
-        const m = rows[0];
-        setActiveProject(m.project_id, m.projects);
-        setMembership({ role: m.role, project: m.projects });
-      } else {
-        setMembership(null);
+      const rows = await fetchMemberships(session.user.id);
+      if (rows.length === 1) {
+        setActiveMembership(rows[0]);
       }
     })();
   }, [session]);
 
+  useEffect(() => {
+    if (activeMembership) {
+      setActiveProject(activeMembership.project_id, activeMembership.projects);
+    }
+  }, [activeMembership]);
+
   const signOut = async () => {
     await logAudit("logout", { email: session?.user?.email });
     await supabase.auth.signOut();
-    setMembership(undefined);
+    setMemberships(undefined);
+    setActiveMembership(null);
   };
+
+  const switchProject = () => setShowSelector(true);
 
   if (session === undefined) {
     return (
@@ -335,7 +376,7 @@ export default function AuthGate() {
       : <SignUpScreen onSwitchToSignIn={() => setMode("signin")} />;
   }
 
-  if (membership === undefined) {
+  if (memberships === undefined) {
     return (
       <div style={{ background: C.paper, minHeight: "100vh" }} className="flex items-center justify-center">
         <Loader2 className="animate-spin" style={{ color: C.navy }} size={28} />
@@ -343,29 +384,57 @@ export default function AuthGate() {
     );
   }
 
-  if (membership === null) {
+  const needsProjectGate = memberships.length === 0;
+  const needsSelector = showSelector || (!activeMembership && memberships.length > 1);
+
+  if (needsProjectGate) {
     return (
       <ProjectGate
         userId={session.user.id}
-        onReady={(projectId, role, meta) => {
-          if (projectId) setActiveProject(projectId, meta);
-          setMembership({ role, project: meta });
+        onReady={async (projectId, role, meta) => {
+          const rows = await fetchMemberships(session.user.id);
+          const picked = projectId ? rows.find((r) => r.project_id === projectId) : rows[rows.length - 1];
+          setActiveMembership(picked || { project_id: projectId, role, projects: meta });
+          setShowSelector(false);
         }}
       />
     );
   }
 
+  if (needsSelector) {
+    return (
+      <ProjectSelector
+        memberships={memberships}
+        onSelect={(m) => {
+          setActiveMembership(m);
+          setShowSelector(false);
+        }}
+        onCreateOrJoinAnother={() => setMemberships([])}
+      />
+    );
+  }
+
+  if (!activeMembership) {
+    return (
+      <div style={{ background: C.paper, minHeight: "100vh" }} className="flex items-center justify-center">
+        <Loader2 className="animate-spin" style={{ color: C.navy }} size={28} />
+      </div>
+    );
+  }
+
   return (
     <App
+      key={activeMembership.project_id}
       currentUser={{
         email: session.user.email,
         name,
-        role: membership.role,
-        projectName: membership.project?.name,
-        projectPlace: membership.project?.place,
-        projectType: membership.project?.type,
+        role: activeMembership.role,
+        projectName: activeMembership.projects?.name,
+        projectPlace: activeMembership.projects?.place,
+        projectType: activeMembership.projects?.type,
       }}
       onSignOut={signOut}
+      onSwitchProject={memberships.length > 1 ? switchProject : undefined}
     />
   );
 }

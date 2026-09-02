@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
-  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog,
+  Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -1152,7 +1152,7 @@ const OWNER_TABS = [
   { key: "audit", label: "Audit Log", icon: ShieldCheck },
 ];
 
-export default function App({ currentUser, onSignOut }) {
+export default function App({ currentUser, onSignOut, onSwitchProject }) {
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
 
@@ -1219,6 +1219,11 @@ export default function App({ currentUser, onSignOut }) {
                     · {ROLE_LABELS[currentUser.role] || currentUser.role}
                   </span>
                 </span>
+              )}
+              {onSwitchProject && (
+                <button onClick={onSwitchProject} style={{ color: "#B9C7D4" }} className="flex items-center gap-1 text-xs">
+                  <Repeat size={14} /> Switch project
+                </button>
               )}
               {onSignOut && (
                 <button onClick={onSignOut} style={{ color: "#B9C7D4" }} className="flex items-center gap-1 text-xs">
