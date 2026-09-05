@@ -1,8 +1,17 @@
 // Vercel serverless function: POST /api/ai
 // Body: { text: string, images?: string[] (base64 jpegs), useSearch?: boolean }
 //
-// Deploy this repo to Vercel, add an ANTHROPIC_API_KEY environment variable
-// in the project settings, and this route works with no other setup.
+// Supports two providers, tried in this order:
+//   1. GEMINI_API_KEY  — Google's Gemini API. Free to use for testing (no
+//      credit card needed for the free tier): grab a key at
+//      https://aistudio.google.com/apikey and add it as GEMINI_API_KEY.
+//   2. ANTHROPIC_API_KEY — Claude via the Anthropic API. This is a paid,
+//      pay-as-you-go product, separate from a Claude.ai subscription —
+//      see console.anthropic.com/settings/billing to add credits.
+//
+// Set whichever one you have a key for; if both are set, Gemini is used
+// (since it's the free option for testing). Deploy this repo to Vercel and
+// add the env var in the project settings — no other setup needed.
 //
 // If you deploy elsewhere (Netlify, a plain Node/Express server, etc.),
 // port this same logic — it's a thin proxy, nothing Vercel-specific except
@@ -18,6 +27,54 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing 'text'" });
   }
 
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+  try {
+    let out;
+    if (geminiKey) {
+      out = await callGemini({ text, images, useSearch, apiKey: geminiKey });
+    } else if (anthropicKey) {
+      out = await callAnthropic({ text, images, useSearch, apiKey: anthropicKey });
+    } else {
+      return res.status(500).json({
+        error: "No AI provider configured — set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in your environment variables.",
+      });
+    }
+    return res.status(200).json({ text: out });
+  } catch (e) {
+    console.error("AI request failed", e);
+    return res.status(502).json({ error: e.message || "AI request failed" });
+  }
+}
+
+async function callGemini({ text, images, useSearch, apiKey }) {
+  const parts = [{ text }];
+  images.forEach((data) => parts.push({ inlineData: { mimeType: "image/jpeg", data } }));
+
+  const body = { contents: [{ parts }] };
+  if (useSearch) {
+    body.tools = [{ googleSearch: {} }];
+  }
+
+  const model = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const geminiRes = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await geminiRes.json();
+  if (!geminiRes.ok) {
+    throw new Error(data?.error?.message || `Gemini error (${geminiRes.status})`);
+  }
+  return (data.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text)
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function callAnthropic({ text, images, useSearch, apiKey }) {
   const content = [];
   images.forEach((data) =>
     content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } })
@@ -33,28 +90,21 @@ export default async function handler(req, res) {
     body.tools = [{ type: "web_search_20250305", name: "web_search" }];
   }
 
-  try {
-    const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-    });
-    const data = await anthropicRes.json();
-    if (!anthropicRes.ok) {
-      console.error("Anthropic error", data);
-      return res.status(502).json({ error: "AI provider error" });
-    }
-    const text = (data.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n\n");
-    return res.status(200).json({ text });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "AI request failed" });
+  const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await anthropicRes.json();
+  if (!anthropicRes.ok) {
+    throw new Error(data?.error?.message || `Anthropic error (${anthropicRes.status})`);
   }
+  return (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n\n");
 }
