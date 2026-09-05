@@ -250,6 +250,29 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
             </select>
           ) : f.type === "textarea" ? (
             <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals[f.key]} onChange={(e) => set(f.key, e.target.value)} />
+          ) : f.type === "file" ? (
+            <div>
+              <input
+                type="file"
+                accept={f.accept || "*/*"}
+                onChange={async (e) => {
+                  const file = e.target.files[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  const isImage = file.type.startsWith("image/");
+                  const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
+                  set(f.key, { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data });
+                }}
+              />
+              {vals[f.key] && (
+                <div style={{ color: C.concrete }} className="text-xs mt-1 flex items-center gap-2">
+                  <span>{vals[f.key].name}</span>
+                  <button type="button" onClick={() => set(f.key, null)} style={{ color: C.concrete }} className="hover:text-red-600">
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+            </div>
           ) : (
             <input
               style={inputStyle}
@@ -1182,7 +1205,7 @@ const documentSchema = [
   { key: "type", label: "Type", type: "select", options: ["Bill", "Agreement", "Receipt", "Other"], required: true },
   { key: "date", label: "Date", type: "date" },
   { key: "amount", label: "Amount (₹)", type: "number" },
-  { key: "vendor", label: "Vendor / party", type: "text" },
+  { key: "attachment", label: "Attach file (photo, PDF, scan)", type: "file", accept: ".pdf,.doc,.docx,image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
@@ -1203,9 +1226,19 @@ function DocumentsTab({ documents, setDocuments }) {
             <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
             <Stamp tone="navy">{d.type}</Stamp>
           </div>
-          <div style={{ color: C.concrete }} className="text-xs mb-1">{d.date} {d.vendor && `· ${d.vendor}`}</div>
+          <div style={{ color: C.concrete }} className="text-xs mb-1">{d.date}</div>
           {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
           <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
+          {d.attachment && (
+            <a
+              href={`data:${d.attachment.mimeType};base64,${d.attachment.data}`}
+              download={d.attachment.name}
+              style={{ color: C.navy }}
+              className="text-xs underline mt-2 inline-flex items-center gap-1"
+            >
+              <Paperclip size={12} /> {d.attachment.name}
+            </a>
+          )}
         </div>
       )}
     />
