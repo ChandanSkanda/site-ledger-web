@@ -190,7 +190,7 @@ const inputStyle = {
   color: C.ink,
 };
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, size }) {
   return (
     <div
       className="fixed inset-0 flex items-center justify-center p-4 z-50"
@@ -199,8 +199,8 @@ function Modal({ title, onClose, children }) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ background: C.card, maxHeight: "88vh" }}
-        className="w-full max-w-lg rounded-lg shadow-2xl overflow-y-auto"
+        style={{ background: C.card, maxHeight: "94vh" }}
+        className={`w-full ${size === "large" ? "max-w-5xl" : "max-w-lg"} rounded-lg shadow-2xl overflow-y-auto`}
       >
         <div
           style={{ borderBottom: `1px solid ${C.line}`, background: C.card }}
@@ -231,9 +231,9 @@ function FilePreview({ file, onClose }) {
   const isPdf = file.mimeType === "application/pdf";
   const dataUrl = `data:${file.mimeType};base64,${file.data}`;
   return (
-    <Modal title={file.name} onClose={onClose}>
-      {isImage && <img src={dataUrl} alt={file.name} style={{ maxWidth: "100%", borderRadius: 6 }} />}
-      {isPdf && <iframe src={dataUrl} title={file.name} style={{ width: "100%", height: "70vh", border: "none" }} />}
+    <Modal title={file.name} onClose={onClose} size="large">
+      {isImage && <img src={dataUrl} alt={file.name} style={{ maxWidth: "100%", maxHeight: "82vh", display: "block", margin: "0 auto", borderRadius: 6 }} />}
+      {isPdf && <iframe src={dataUrl} title={file.name} style={{ width: "100%", height: "82vh", border: "none" }} />}
       {!isImage && !isPdf && (
         <p style={{ color: C.concrete }} className="text-sm mb-3">
           This file type can't be previewed here — download it to open it.
