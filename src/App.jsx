@@ -640,7 +640,9 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         .join("\n");
       const out = await askClaude({
         text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft || "(see attached plan file)"}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
-        ...(planFile && planFile.type.startsWith("image/") ? { images: [planFile.b64] } : {}),
+        ...(planFile && (planFile.type.startsWith("image/") || planFile.type === "application/pdf")
+          ? { images: [{ data: planFile.b64, mimeType: planFile.type }] }
+          : {}),
       });
       setReview(out);
     } catch (e) {
@@ -771,7 +773,7 @@ function GalleryTab({ gallery, setGallery }) {
     setAnalyzing(true);
     try {
       const out = await askClaude({
-        images: [pending.b64],
+        images: [{ data: pending.b64, mimeType: "image/jpeg" }],
         text: "This is a daily progress photo from a house construction site in Bangalore, India. Look carefully and: 1) count how many people appear to be working / on-site (laborers, masons, engineers etc.) 2) count how many appear to be bystanders/visitors/not working, 3) categorize the stage of construction visible (e.g. demolition, excavation, foundation, structure, plastering, finishing etc.), 4) note anything that looks like a safety issue or something worth flagging, 5) give one short caption line. Answer in short labeled lines, no long paragraphs.",
       });
       setPending((p) => ({ ...p, note: out }));

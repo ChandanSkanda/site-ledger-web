@@ -30,12 +30,19 @@ export default async function handler(req, res) {
   const geminiKey = process.env.GEMINI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
+  // Accept either plain base64 strings (assumed JPEG — the old shape) or
+  // { data, mimeType } objects, so a PDF plan upload can be sent as
+  // itself instead of being silently dropped.
+  const files = images.map((img) =>
+    typeof img === "string" ? { data: img, mimeType: "image/jpeg" } : img
+  );
+
   try {
     let out;
     if (geminiKey) {
-      out = await callGemini({ text, images, useSearch, apiKey: geminiKey });
+      out = await callGemini({ text, files, useSearch, apiKey: geminiKey });
     } else if (anthropicKey) {
-      out = await callAnthropic({ text, images, useSearch, apiKey: anthropicKey });
+      out = await callAnthropic({ text, files, useSearch, apiKey: anthropicKey });
     } else {
       return res.status(500).json({
         error: "No AI provider configured — set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in your environment variables.",
@@ -48,9 +55,9 @@ export default async function handler(req, res) {
   }
 }
 
-async function callGemini({ text, images, useSearch, apiKey }) {
+async function callGemini({ text, files, useSearch, apiKey }) {
   const parts = [{ text }];
-  images.forEach((data) => parts.push({ inlineData: { mimeType: "image/jpeg", data } }));
+  files.forEach(({ data, mimeType }) => parts.push({ inlineData: { mimeType: mimeType || "image/jpeg", data } }));
 
   const body = { contents: [{ parts }] };
   if (useSearch) {
@@ -74,11 +81,17 @@ async function callGemini({ text, images, useSearch, apiKey }) {
     .join("\n\n");
 }
 
-async function callAnthropic({ text, images, useSearch, apiKey }) {
+async function callAnthropic({ text, files, useSearch, apiKey }) {
   const content = [];
-  images.forEach((data) =>
-    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } })
-  );
+  files.forEach(({ data, mimeType }) => {
+    const mt = mimeType || "image/jpeg";
+    // Claude takes PDFs as a "document" block, everything else as "image".
+    content.push(
+      mt === "application/pdf"
+        ? { type: "document", source: { type: "base64", media_type: mt, data } }
+        : { type: "image", source: { type: "base64", media_type: mt, data } }
+    );
+  });
   content.push({ type: "text", text });
 
   const body = {
