@@ -1209,39 +1209,95 @@ const documentSchema = [
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
-function DocumentsTab({ documents, setDocuments }) {
+function DocumentsTab({ documents, setDocuments, currentUser }) {
+  const [open, setOpen] = useState(false);
+  const isOwner = currentUser?.role === "owner";
+
+  // Bills, receipts, and "other" are private to whoever uploaded them
+  // (plus the owner, who sees everything). Agreements are shared between
+  // the builder and the owner only.
+  const canSee = (d) => {
+    if (isOwner) return true;
+    if (d.type === "Agreement") return currentUser?.role === "builder";
+    return !!d.uploadedBy && d.uploadedBy === currentUser?.id;
+  };
+  const visible = documents.filter(canSee);
+
+  // Deliberately operate on the FULL `documents` array here, not
+  // `visible` — persisting a filtered subset would silently drop every
+  // document this viewer can't see.
+  const add = async (vals) => {
+    const next = [
+      { id: uid(), uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", ...vals },
+      ...documents,
+    ];
+    setDocuments(next);
+    setOpen(false);
+    await saveKey("documents", next);
+  };
+  const remove = async (id) => {
+    const next = documents.filter((d) => d.id !== id);
+    setDocuments(next);
+    await saveKey("documents", next);
+  };
+
   return (
-    <ListSection
-      icon={FileText}
-      title="Bills &amp; agreements"
-      subtitle="Keep a record for future reference and disputes"
-      schema={documentSchema}
-      items={documents}
-      setItems={setDocuments}
-      storageKey="documents"
-      addLabel="Add document"
-      renderCard={(d) => (
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
-            <Stamp tone="navy">{d.type}</Stamp>
-          </div>
-          <div style={{ color: C.concrete }} className="text-xs mb-1">{d.date}</div>
-          {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
-          <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
-          {d.attachment && (
-            <a
-              href={`data:${d.attachment.mimeType};base64,${d.attachment.data}`}
-              download={d.attachment.name}
-              style={{ color: C.navy }}
-              className="text-xs underline mt-2 inline-flex items-center gap-1"
-            >
-              <Paperclip size={12} /> {d.attachment.name}
-            </a>
-          )}
-        </div>
+    <div>
+      <SectionHeader
+        icon={FileText}
+        title="Bills &amp; agreements"
+        subtitle={
+          isOwner
+            ? "Keep a record for future reference and disputes"
+            : "Your bills/receipts are private to you and the owner; agreements are shared with the builder and owner"
+        }
+        action={
+          <Btn onClick={() => setOpen(true)}>
+            <Plus size={16} /> Add document
+          </Btn>
+        }
+      />
+      {visible.length === 0 && (
+        <p style={{ color: C.concrete }} className="text-sm italic">Nothing here yet.</p>
       )}
-    />
+      <div className="grid gap-3 sm:grid-cols-2">
+        {visible.map((d) => (
+          <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 relative">
+            <button
+              onClick={() => remove(d.id)}
+              style={{ color: C.concrete }}
+              className="absolute top-3 right-3 hover:text-red-600"
+            >
+              <Trash2 size={15} />
+            </button>
+            <div className="flex items-center justify-between mb-1">
+              <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
+              <Stamp tone="navy">{d.type}</Stamp>
+            </div>
+            <div style={{ color: C.concrete }} className="text-xs mb-1">
+              {d.date}{isOwner && d.uploadedByName ? ` · ${d.uploadedByName}` : ""}
+            </div>
+            {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
+            <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
+            {d.attachment && (
+              <a
+                href={`data:${d.attachment.mimeType};base64,${d.attachment.data}`}
+                download={d.attachment.name}
+                style={{ color: C.navy }}
+                className="text-xs underline mt-2 inline-flex items-center gap-1"
+              >
+                <Paperclip size={12} /> {d.attachment.name}
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+      {open && (
+        <Modal title="Add document" onClose={() => setOpen(false)}>
+          <SchemaForm schema={documentSchema} onSubmit={add} />
+        </Modal>
+      )}
+    </div>
   );
 }
 
@@ -1529,7 +1585,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
         {tab === "permissions" && canSee("permissions") && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
         {tab === "people" && canSee("people") && <PeopleTab contacts={contacts} setContacts={setContacts} />}
         {tab === "products" && canSee("products") && <ProductsTab products={products} setProducts={setProducts} />}
-        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
+        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} currentUser={currentUser} />}
         {tab === "issues" && <IssuesTab issues={issues} setIssues={setIssues} />}
         {tab === "team" && currentUser?.role === "owner" && <TeamTab currentUserEmail={currentUser.email} />}
         {tab === "audit" && currentUser?.role === "owner" && <AuditLogTab />}

@@ -430,6 +430,7 @@ export default function AuthGate() {
     <App
       key={activeMembership.project_id}
       currentUser={{
+        id: session.user.id,
         email: session.user.email,
         name,
         role: activeMembership.role,
