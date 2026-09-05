@@ -44,9 +44,12 @@ function LoginScreen({ onSwitchToSignUp }) {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (error) {
+      console.error(`[SiteLedger] Sign-in FAILED for ${email}:`, error.message);
+      await logAudit("login_failed", { email, error: error.message });
       setError(error.message);
       return;
     }
+    console.log(`[SiteLedger] Sign-in successful for ${email}`);
     logAudit("login", { email });
   };
 

@@ -222,6 +222,32 @@ function Modal({ title, onClose, children }) {
   );
 }
 
+// Shows an uploaded image or PDF inline (in-page), rather than making the
+// browser download it — used anywhere a { name, mimeType, data } file is
+// attached (documents, the plan file, etc).
+function FilePreview({ file, onClose }) {
+  if (!file) return null;
+  const isImage = file.mimeType?.startsWith("image/");
+  const isPdf = file.mimeType === "application/pdf";
+  const dataUrl = `data:${file.mimeType};base64,${file.data}`;
+  return (
+    <Modal title={file.name} onClose={onClose}>
+      {isImage && <img src={dataUrl} alt={file.name} style={{ maxWidth: "100%", borderRadius: 6 }} />}
+      {isPdf && <iframe src={dataUrl} title={file.name} style={{ width: "100%", height: "70vh", border: "none" }} />}
+      {!isImage && !isPdf && (
+        <p style={{ color: C.concrete }} className="text-sm mb-3">
+          This file type can't be previewed here — download it to open it.
+        </p>
+      )}
+      <div className="mt-3">
+        <a href={dataUrl} download={file.name} style={{ color: C.navy }} className="text-xs underline">
+          Download {file.name}
+        </a>
+      </div>
+    </Modal>
+  );
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Generic schema-driven form                                             */
 /* ---------------------------------------------------------------------- */
@@ -611,6 +637,7 @@ const progressSchema = [
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
   const [planFile, setPlanFile] = useState(meta.planFile || null);
+  const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
   const [review, setReview] = useState("");
   const planFileRef = useRef();
@@ -727,15 +754,22 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           </Btn>
           {planFile && (
             <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
-              <a href={`data:${planFile.type};base64,${planFile.b64}`} download={planFile.name} style={{ color: C.navy }} className="underline">
+              <button
+                onClick={() => setPlanFilePreview(true)}
+                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                className="underline"
+              >
                 {planFile.name}
-              </a>
+              </button>
               <button onClick={removePlanFile} style={{ color: C.concrete }} className="hover:text-red-600">
                 <X size={13} />
               </button>
             </span>
           )}
         </div>
+        {planFilePreview && (
+          <FilePreview file={{ name: planFile.name, mimeType: planFile.type, data: planFile.b64 }} onClose={() => setPlanFilePreview(false)} />
+        )}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <Btn onClick={crossCheck} disabled={checking || (!planDraft.trim() && !planFile)} tone="rust">
             {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
@@ -1211,6 +1245,7 @@ const documentSchema = [
 
 function DocumentsTab({ documents, setDocuments, currentUser }) {
   const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState(null);
   const isOwner = currentUser?.role === "owner";
 
   // Bills, receipts, and "other" are private to whoever uploaded them
@@ -1227,13 +1262,12 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
   // `visible` — persisting a filtered subset would silently drop every
   // document this viewer can't see.
   const add = async (vals) => {
-    const next = [
-      { id: uid(), uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", ...vals },
-      ...documents,
-    ];
+    const doc = { id: uid(), uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", ...vals };
+    const next = [doc, ...documents];
     setDocuments(next);
     setOpen(false);
-    await saveKey("documents", next);
+    const ok = await saveKey("documents", next);
+    console.log(ok ? `[SiteLedger] Document uploaded: "${doc.title}" (${doc.type})` : `[SiteLedger] Document upload FAILED: "${doc.title}"`);
   };
   const remove = async (id) => {
     const next = documents.filter((d) => d.id !== id);
@@ -1280,14 +1314,13 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
             {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
             <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
             {d.attachment && (
-              <a
-                href={`data:${d.attachment.mimeType};base64,${d.attachment.data}`}
-                download={d.attachment.name}
-                style={{ color: C.navy }}
+              <button
+                onClick={() => setPreview(d.attachment)}
+                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
                 className="text-xs underline mt-2 inline-flex items-center gap-1"
               >
                 <Paperclip size={12} /> {d.attachment.name}
-              </a>
+              </button>
             )}
           </div>
         ))}
@@ -1297,6 +1330,7 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
           <SchemaForm schema={documentSchema} onSubmit={add} />
         </Modal>
       )}
+      <FilePreview file={preview} onClose={() => setPreview(null)} />
     </div>
   );
 }
@@ -1414,8 +1448,10 @@ function AuditLogTab() {
 
   const actionLabel = {
     login: "Signed in",
+    login_failed: "Sign-in failed",
     logout: "Signed out",
     data_saved: "Updated data",
+    save_failed: "Save failed",
     project_created: "Created the project",
     project_joined: "Joined the project",
     role_changed: "Changed a role",
