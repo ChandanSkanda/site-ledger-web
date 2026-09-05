@@ -46,15 +46,7 @@ export default async function handler(req, res) {
     const data = await anthropicRes.json();
     if (!anthropicRes.ok) {
       console.error("Anthropic error", data);
-      return res.status(502).json({
-        error: "AI provider error",
-        debug: {
-          anthropicStatus: anthropicRes.status,
-          anthropicBody: data,
-          hasKey: !!process.env.ANTHROPIC_API_KEY,
-          keyPrefix: (process.env.ANTHROPIC_API_KEY || "").slice(0, 7),
-        },
-      });
+      return res.status(502).json({ error: "AI provider error" });
     }
     const text = (data.content || [])
       .filter((b) => b.type === "text")
