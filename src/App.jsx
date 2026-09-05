@@ -3,6 +3,7 @@ import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
+  Upload, Download, Paperclip,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -64,6 +65,15 @@ function compressImage(file, maxWidth = 640, quality = 0.6) {
       img.onerror = reject;
       img.src = e.target.result;
     };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result.split(",")[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -257,10 +267,83 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
 }
 
 /* ---------------------------------------------------------------------- */
+/*  CSV import / export helpers                                            */
+/* ---------------------------------------------------------------------- */
+function csvEscape(value) {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function toCSV(schema, items) {
+  const header = schema.map((f) => csvEscape(f.label)).join(",");
+  const rows = items.map((item) => schema.map((f) => csvEscape(item[f.key])).join(","));
+  return [header, ...rows].join("\r\n");
+}
+
+function parseCSVText(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      pushField();
+    } else if (c === "\n") {
+      pushField();
+      pushRow();
+    } else if (c === "\r") {
+      // ignore — paired \n handles the row break
+    } else {
+      field += c;
+    }
+  }
+  if (field.length || row.length) { pushField(); pushRow(); }
+  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ""));
+}
+
+function rowsToItems(schema, rows) {
+  if (!rows.length) return { items: [], skipped: 0 };
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const colForField = schema.map((f) => {
+    let idx = header.indexOf(f.label.toLowerCase());
+    if (idx === -1) idx = header.indexOf(f.key.toLowerCase());
+    return idx;
+  });
+  const items = [];
+  let skipped = 0;
+  for (let r = 1; r < rows.length; r++) {
+    const raw = rows[r];
+    if (raw.every((c) => !c || !c.trim())) continue;
+    const obj = { id: uid() };
+    schema.forEach((f, i) => {
+      const idx = colForField[i];
+      obj[f.key] = idx >= 0 && raw[idx] !== undefined ? raw[idx] : "";
+    });
+    const missingRequired = schema.some((f) => f.required && !String(obj[f.key] || "").trim());
+    if (missingRequired) { skipped++; continue; }
+    items.push(obj);
+  }
+  return { items, skipped };
+}
+
+/* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry" }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName }) {
   const [open, setOpen] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
+  const importRef = useRef();
 
   const persist = onPersist || ((next) => saveKey(storageKey, next));
 
@@ -276,6 +359,40 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
     await persist(next);
   };
 
+  const exportCSV = () => {
+    const csv = toCSV(schema, items);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${exportFileName || storageKey}-${today()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importCSV = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCSVText(text);
+      const { items: parsed, skipped } = rowsToItems(schema, rows);
+      if (!parsed.length) {
+        setImportMsg(skipped ? `No rows imported — ${skipped} skipped (missing required fields).` : "No rows found in that file.");
+        return;
+      }
+      const next = [...parsed, ...items];
+      setItems(next);
+      await persist(next);
+      setImportMsg(`Imported ${parsed.length} ${parsed.length === 1 ? "entry" : "entries"}${skipped ? ` — ${skipped} skipped` : ""}.`);
+    } catch {
+      setImportMsg("Could not read that file — make sure it's a CSV exported from here.");
+    }
+  };
+
   return (
     <div>
       <SectionHeader
@@ -283,11 +400,27 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
         title={title}
         subtitle={subtitle}
         action={
-          <Btn onClick={() => setOpen(true)}>
-            <Plus size={16} /> {addLabel}
-          </Btn>
+          <div className="flex items-center gap-2 flex-wrap">
+            {enableImportExport && (
+              <>
+                <input type="file" accept=".csv,text/csv" ref={importRef} className="hidden" onChange={importCSV} />
+                <Btn onClick={() => importRef.current.click()} tone="ghost" small>
+                  <Upload size={14} /> Import CSV
+                </Btn>
+                <Btn onClick={exportCSV} tone="ghost" small disabled={!items.length}>
+                  <Download size={14} /> Export CSV
+                </Btn>
+              </>
+            )}
+            <Btn onClick={() => setOpen(true)}>
+              <Plus size={16} /> {addLabel}
+            </Btn>
+          </div>
         }
       />
+      {enableImportExport && importMsg && (
+        <p style={{ color: C.concrete }} className="text-xs mb-3">{importMsg}</p>
+      )}
       {items.length === 0 && (
         <p style={{ color: C.concrete }} className="text-sm italic">
           Nothing logged yet. Add your first entry.
@@ -454,13 +587,35 @@ const progressSchema = [
 
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
+  const [planFile, setPlanFile] = useState(meta.planFile || null);
   const [checking, setChecking] = useState(false);
   const [review, setReview] = useState("");
+  const planFileRef = useRef();
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
 
   const savePlan = async () => {
     const next = { ...meta, planText: planDraft };
+    setMeta(next);
+    await saveKey("meta", next);
+  };
+
+  const onPickPlanFile = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const isImage = file.type.startsWith("image/");
+    const b64 = isImage ? await compressImage(file, 1000, 0.75) : await fileToBase64(file);
+    const nextFile = { name: file.name, type: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), b64 };
+    setPlanFile(nextFile);
+    const next = { ...meta, planFile: nextFile };
+    setMeta(next);
+    await saveKey("meta", next);
+  };
+
+  const removePlanFile = async () => {
+    setPlanFile(null);
+    const next = { ...meta, planFile: null };
     setMeta(next);
     await saveKey("meta", next);
   };
@@ -475,7 +630,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
   };
 
   const crossCheck = async () => {
-    if (!planDraft.trim()) return;
+    if (!planDraft.trim() && !planFile) return;
     setChecking(true);
     setReview("");
     try {
@@ -484,7 +639,8 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         .map((p) => `${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || ""} [flag: ${p.flag || "None"}]`)
         .join("\n");
       const out = await askClaude({
-        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
+        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft || "(see attached plan file)"}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
+        ...(planFile && planFile.type.startsWith("image/") ? { images: [planFile.b64] } : {}),
       });
       setReview(out);
     } catch (e) {
@@ -530,7 +686,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           Building plan &amp; schedule
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-2">
-          Paste your approved plan, stage-wise timeline, or key milestones here. Claude will cross-question your day-to-day log against it.
+          Paste your approved plan, stage-wise timeline, or key milestones here, or upload the plan/schedule file itself. Claude will cross-question your day-to-day log against it.
         </p>
         <textarea
           style={{ ...inputStyle, minHeight: "90px" }}
@@ -540,7 +696,23 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           placeholder="e.g. Foundation by 15 Sep, Superstructure by 30 Nov, Roof slab by 15 Jan…"
         />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <Btn onClick={crossCheck} disabled={checking || !planDraft.trim()} tone="rust">
+          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" ref={planFileRef} className="hidden" onChange={onPickPlanFile} />
+          <Btn onClick={() => planFileRef.current.click()} tone="ghost" small>
+            <Paperclip size={14} /> {planFile ? "Replace file" : "Upload plan / schedule file"}
+          </Btn>
+          {planFile && (
+            <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
+              <a href={`data:${planFile.type};base64,${planFile.b64}`} download={planFile.name} style={{ color: C.navy }} className="underline">
+                {planFile.name}
+              </a>
+              <button onClick={removePlanFile} style={{ color: C.concrete }} className="hover:text-red-600">
+                <X size={13} />
+              </button>
+            </span>
+          )}
+        </div>
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <Btn onClick={crossCheck} disabled={checking || (!planDraft.trim() && !planFile)} tone="rust">
             {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
             Cross-check progress vs. plan
           </Btn>
@@ -561,6 +733,8 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         setItems={setProgress}
         storageKey="progress"
         addLabel="Log today's progress"
+        enableImportExport
+        exportFileName="daily-progress-log"
         renderCard={(p) => (
           <div>
             <div className="flex items-center gap-2 flex-wrap mb-1">
