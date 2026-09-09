@@ -15,6 +15,44 @@ import { getActiveProjectId } from "./lib/activeProject";
 /* ---------------------------------------------------------------------- */
 const FONTS = `
 @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+* { box-sizing: border-box; }
+
+::selection { background: #B7451F; color: #fff; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #CFC8B6; border-radius: 999px; border: 2px solid #E7E2D3; }
+::-webkit-scrollbar-thumb:hover { background: #B7451F; }
+
+input, select, textarea {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #16324F !important;
+  box-shadow: 0 0 0 3px rgba(22, 50, 79, 0.14);
+}
+
+button { transition: transform 0.12s ease, box-shadow 0.15s ease, background-color 0.15s ease, opacity 0.15s ease; }
+button:active:not(:disabled) { transform: scale(0.97); }
+
+@keyframes ledgerModalIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes ledgerOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.ledger-modal-overlay { animation: ledgerOverlayIn 0.15s ease; }
+.ledger-modal-panel { animation: ledgerModalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1); }
+
+@keyframes ledgerFadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ledger-fade-up { animation: ledgerFadeUp 0.25s ease both; }
 `;
 const C = {
   navy: "#16324F",
@@ -106,6 +144,7 @@ function Stamp({ children, tone = "concrete" }) {
         transform: "rotate(-2deg)",
         fontWeight: 600,
         whiteSpace: "nowrap",
+        boxShadow: "1px 2px 3px rgba(0,0,0,0.1)",
       }}
     >
       {children}
@@ -118,8 +157,8 @@ function SectionHeader({ icon: Icon, title, subtitle, action }) {
     <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
       <div className="flex items-center gap-3">
         <div
-          style={{ background: C.navy, color: C.paper }}
-          className="p-2.5 rounded-md"
+          style={{ background: C.navy, color: C.paper, boxShadow: "0 2px 6px rgba(22,50,79,0.35)" }}
+          className="p-2.5 rounded-lg"
         >
           <Icon size={20} />
         </div>
@@ -155,10 +194,11 @@ function Btn({ children, onClick, tone = "navy", type = "button", disabled, smal
         border: tone === "ghost" ? `1.5px solid ${C.navy}` : "none",
         opacity: disabled ? 0.55 : 1,
         fontFamily: "'Inter', sans-serif",
+        boxShadow: tone === "ghost" || disabled ? "none" : "0 1px 2px rgba(22,50,79,0.18)",
       }}
       className={`inline-flex items-center gap-1.5 rounded-md font-semibold ${
         small ? "px-2.5 py-1.5 text-xs" : "px-4 py-2 text-sm"
-      } hover:opacity-90 transition disabled:cursor-not-allowed`}
+      } hover:opacity-85 hover:shadow-md disabled:hover:shadow-none transition disabled:cursor-not-allowed`}
     >
       {children}
     </button>
@@ -183,8 +223,8 @@ const inputStyle = {
   width: "100%",
   border: `1.5px solid ${C.line}`,
   background: "#fff",
-  borderRadius: "6px",
-  padding: "8px 10px",
+  borderRadius: "7px",
+  padding: "9px 11px",
   fontFamily: "'Inter', sans-serif",
   fontSize: "14px",
   color: C.ink,
@@ -193,14 +233,14 @@ const inputStyle = {
 function Modal({ title, onClose, children, size }) {
   return (
     <div
-      className="fixed inset-0 flex items-center justify-center p-4 z-50"
-      style={{ background: "rgba(22,50,79,0.55)" }}
+      className="ledger-modal-overlay fixed inset-0 flex items-center justify-center p-4 z-50"
+      style={{ background: "rgba(22,50,79,0.6)", backdropFilter: "blur(1px)" }}
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{ background: C.card, maxHeight: "94vh" }}
-        className={`w-full ${size === "large" ? "max-w-5xl" : "max-w-lg"} rounded-lg shadow-2xl overflow-y-auto`}
+        className={`ledger-modal-panel w-full ${size === "large" ? "max-w-5xl" : "max-w-lg"} rounded-lg shadow-2xl overflow-y-auto`}
       >
         <div
           style={{ borderBottom: `1px solid ${C.line}`, background: C.card }}
@@ -480,7 +520,7 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
           <div
             key={item.id}
             style={{ background: C.card, border: `1px solid ${C.line}` }}
-            className="rounded-lg p-4 relative"
+            className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 relative"
           >
             <button
               onClick={() => remove(item.id)}
@@ -522,8 +562,8 @@ function Dashboard({ data, setTab, currentUser }) {
   const loggedStages = new Set(progress.map((p) => p.stage));
 
   const stat = (label, value, tone, Icon) => (
-    <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 flex items-center gap-3">
-      <div style={{ background: tone, color: "#fff" }} className="p-2 rounded-md shrink-0">
+    <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 flex items-center gap-3">
+      <div style={{ background: tone, color: "#fff", boxShadow: "0 2px 5px rgba(0,0,0,0.18)" }} className="p-2 rounded-lg shrink-0">
         <Icon size={18} />
       </div>
       <div>
@@ -549,7 +589,7 @@ function Dashboard({ data, setTab, currentUser }) {
       </div>
 
       {/* Stage ledger — signature element */}
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-5 mb-8">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-5 mb-8">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide">
             Construction sequence
@@ -612,7 +652,7 @@ function Dashboard({ data, setTab, currentUser }) {
       </div>
 
       {loan.enabled && (
-        <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mt-6">
+        <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mt-6">
           <div style={{ color: C.concrete }} className="text-xs uppercase tracking-wide font-semibold mb-1">Home loan</div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-sm">
             Sanctioned {fmtINR(loan.sanctioned)} · Disbursed {fmtINR(loan.disbursed)}
@@ -703,7 +743,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
 
   return (
     <div>
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
           Stage completion
         </h3>
@@ -733,7 +773,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         </div>
       </div>
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
           Building plan &amp; schedule
         </h3>
@@ -892,7 +932,7 @@ function GalleryTab({ gallery, setGallery }) {
       {gallery.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">No photos yet.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {gallery.map((g) => (
-          <div key={g.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg overflow-hidden">
+          <div key={g.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 overflow-hidden">
             <img src={`data:image/jpeg;base64,${g.b64}`} className="w-full object-cover" style={{ height: 160 }} />
             <div className="p-3">
               <div className="flex items-center justify-between mb-1">
@@ -969,7 +1009,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
     <div>
       <SectionHeader icon={Wallet} title="Budget &amp; expenses" subtitle="Every rupee, from demolition to handover" />
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6 grid gap-4 sm:grid-cols-3 items-end">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6 grid gap-4 sm:grid-cols-3 items-end">
         <Field label="Total budget allocated (₹)">
           <input style={inputStyle} type="number" value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)} onBlur={saveBudget} />
         </Field>
@@ -985,7 +1025,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         </div>
       </div>
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-3">
           Monthly report
         </h3>
@@ -1023,7 +1063,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         )}
       />
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mt-8">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mt-8">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <Landmark size={18} style={{ color: C.navy }} />
@@ -1187,7 +1227,7 @@ function ProductsTab({ products, setProducts }) {
 
   return (
     <div>
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2 flex items-center gap-2">
           <Search size={16} /> Check a builder's quote
         </h3>
@@ -1296,7 +1336,7 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
       )}
       <div className="grid gap-3 sm:grid-cols-2">
         {visible.map((d) => (
-          <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-4 relative">
+          <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 relative">
             <button
               onClick={() => remove(d.id)}
               style={{ color: C.concrete }}
@@ -1464,7 +1504,7 @@ function AuditLogTab() {
       {entries?.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">Nothing logged yet.</p>}
       <div className="space-y-2">
         {entries?.map((e) => (
-          <div key={e.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2">
+          <div key={e.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2 shadow-sm hover:shadow-md transition-shadow duration-200">
             <div>
               <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="text-sm font-semibold uppercase">
                 {actionLabel[e.action] || e.action}
@@ -1552,7 +1592,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   return (
     <div style={{ background: C.paper, minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
       <style>{FONTS}</style>
-      <header style={{ background: C.navy }} className="text-white sticky top-0 z-40 shadow-md">
+      <header style={{ background: C.navy, boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }} className="text-white sticky top-0 z-40">
         <div className="max-w-6xl mx-auto px-4 pt-4 pb-0">
           <div className="flex items-center gap-2 mb-3">
             <Hammer size={22} style={{ color: C.yellow }} />
@@ -1596,8 +1636,9 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
                     color: active ? "#fff" : "#B9C7D4",
                     fontFamily: "'Inter', sans-serif",
                     whiteSpace: "nowrap",
+                    transition: "color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease",
                   }}
-                  className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-semibold"
+                  className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-semibold rounded-t-md hover:bg-white/5 hover:text-white"
                 >
                   <Icon size={15} /> {t.label}
                 </button>
