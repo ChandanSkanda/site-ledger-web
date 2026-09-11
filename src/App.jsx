@@ -1197,26 +1197,46 @@ const productSchema = [
   { key: "item", label: "Item", type: "text", required: true },
   { key: "room", label: "Room / area", type: "text" },
   { key: "brand", label: "Brand / model", type: "text" },
+  { key: "productId", label: "Product ID / material no. (optional)", type: "text" },
   { key: "price", label: "Price paid (₹)", type: "number" },
   { key: "claimedPrice", label: "Builder's quoted price (₹)", type: "number" },
   { key: "vendor", label: "Vendor / shop", type: "text" },
+  { key: "image", label: "Photo (helps you identify the exact product later)", type: "file", accept: "image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
 function ProductsTab({ products, setProducts }) {
   const [checkItem, setCheckItem] = useState("");
+  const [checkId, setCheckId] = useState("");
   const [checkPrice, setCheckPrice] = useState("");
+  const [checkImage, setCheckImage] = useState(null);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState("");
+  const [preview, setPreview] = useState(null);
+  const checkImageRef = useRef();
+
+  const onPickCheckImage = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const data = await compressImage(file, 1000, 0.75);
+    setCheckImage({ name: file.name, mimeType: "image/jpeg", data });
+  };
 
   const runCheck = async () => {
-    if (!checkItem.trim()) return;
+    if (!checkItem.trim() && !checkImage) return;
     setChecking(true);
     setResult("");
     try {
+      const idPart = checkId.trim() ? ` (product ID / model number: "${checkId.trim()}")` : "";
+      const pricePart = checkPrice ? ` at ₹${checkPrice}` : "";
+      const text = checkImage
+        ? `A construction builder in Bangalore, India quoted this item${checkItem.trim() ? `: "${checkItem}"` : ""}${idPart}${pricePart}. A photo of the item is attached — use it to identify the exact product (brand, type, likely model) if that isn't already clear from the description. Then search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) what you think the product is, 2) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 3) 2-3 specific alternative brands/models at a similar or better price, 4) a one-line verdict. Keep it short and practical.`
+        : `A construction builder in Bangalore, India quoted this item: "${checkItem}"${idPart}${pricePart}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`;
       const out = await askClaude({
         useSearch: true,
-        text: `A construction builder in Bangalore, India quoted this item: "${checkItem}"${checkPrice ? ` at ₹${checkPrice}` : ""}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`,
+        text,
+        ...(checkImage ? { images: [{ data: checkImage.data, mimeType: checkImage.mimeType }] } : {}),
       });
       setResult(out);
     } catch {
@@ -1231,17 +1251,41 @@ function ProductsTab({ products, setProducts }) {
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2 flex items-center gap-2">
           <Search size={16} /> Check a builder's quote
         </h3>
-        <div className="grid gap-3 sm:grid-cols-3 items-end">
+        <p style={{ color: C.concrete }} className="text-xs mb-3">
+          Describe the item, or attach a photo and let AI identify it — either way you'll get a market price check.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Item the builder quoted">
             <input style={inputStyle} value={checkItem} onChange={(e) => setCheckItem(e.target.value)} placeholder="e.g. Kajaria vitrified tile 2x2" />
+          </Field>
+          <Field label="Product ID / model number (optional)">
+            <input style={inputStyle} value={checkId} onChange={(e) => setCheckId(e.target.value)} placeholder="e.g. SKU, batch or model code" />
           </Field>
           <Field label="Their quoted price (₹, optional)">
             <input style={inputStyle} type="number" value={checkPrice} onChange={(e) => setCheckPrice(e.target.value)} />
           </Field>
-          <Btn onClick={runCheck} disabled={checking} tone="rust">
-            {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
-          </Btn>
+          <Field label="Photo (optional)">
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="file" accept="image/*" ref={checkImageRef} className="hidden" onChange={onPickCheckImage} />
+              <Btn onClick={() => checkImageRef.current.click()} tone="ghost" small>
+                <Paperclip size={14} /> {checkImage ? "Replace photo" : "Attach photo"}
+              </Btn>
+              {checkImage && (
+                <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
+                  <button type="button" onClick={() => setPreview(checkImage)} style={{ color: C.navy }} className="underline">
+                    {checkImage.name}
+                  </button>
+                  <button type="button" onClick={() => setCheckImage(null)} style={{ color: C.concrete }} className="hover:text-red-600">
+                    <X size={13} />
+                  </button>
+                </span>
+              )}
+            </div>
+          </Field>
         </div>
+        <Btn onClick={runCheck} disabled={checking || (!checkItem.trim() && !checkImage)} tone="rust">
+          {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
+        </Btn>
         {result && <div style={{ background: "#fff", border: `1px solid ${C.line}`, whiteSpace: "pre-wrap" }} className="mt-4 rounded-md p-3 text-sm">{result}</div>}
       </div>
 
@@ -1255,18 +1299,33 @@ function ProductsTab({ products, setProducts }) {
         storageKey="products"
         addLabel="Add product"
         renderCard={(p) => (
-          <div>
-            <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
-            <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
-            <div className="flex items-center gap-3">
-              {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
-              {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
+          <div className="flex items-start gap-3">
+            {p.image && (
+              <button type="button" onClick={() => setPreview(p.image)} className="shrink-0">
+                <img
+                  src={`data:${p.image.mimeType};base64,${p.image.data}`}
+                  alt={p.item}
+                  style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.line}` }}
+                />
+              </button>
+            )}
+            <div className="min-w-0">
+              <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
+              <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
+              {p.productId && (
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs mb-1">ID: {p.productId}</div>
+              )}
+              <div className="flex items-center gap-3">
+                {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
+                {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
+              </div>
+              {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
+              {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
             </div>
-            {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
-            {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
           </div>
         )}
       />
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }
