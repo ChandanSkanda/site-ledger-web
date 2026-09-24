@@ -12,7 +12,14 @@ export async function askClaude({ text, images = [], useSearch = false }) {
     body: JSON.stringify({ text, images, useSearch }),
   });
   if (!res.ok) {
-    throw new Error(`AI request failed (${res.status})`);
+    let detail = "";
+    try {
+      const body = await res.text();
+      try { detail = JSON.parse(body).error || ""; } catch { detail = body.slice(0, 200); }
+    } catch {}
+    if (res.status === 413) detail = "The files sent were too large for one request.";
+    if (res.status === 504) detail = "The AI took too long to answer.";
+    throw new Error(`AI request failed (${res.status})${detail ? ": " + detail : ""}`);
   }
   const data = await res.json();
   return data.text || "";

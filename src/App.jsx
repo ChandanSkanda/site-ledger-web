@@ -1061,6 +1061,51 @@ function ProgressCard({ entry, onRecheck }) {
   );
 }
 
+// Big PDFs (scanned or high-detail drawings) can be several MB — too large
+// to send in one request. Render the first pages to sharp JPEGs instead,
+// which the AI reads just as well and are a fraction of the size.
+async function pdfToImages(b64, { maxPages = 4, width = 1800, quality = 0.8 } = {}) {
+  const pdfjs = await import("pdfjs-dist");
+  const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
+  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const doc = await pdfjs.getDocument({ data: bytes }).promise;
+  const out = [];
+  for (let n = 1; n <= Math.min(doc.numPages, maxPages); n++) {
+    const page = await doc.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: width / base.width });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    out.push(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+  }
+  return { images: out, totalPages: doc.numPages };
+}
+
+// Re-compress an already-stored base64 image to a smaller size.
+function shrinkBase64Image(b64, maxWidth = 1600, quality = 0.75) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+    };
+    img.onerror = () => resolve(b64);
+    img.src = `data:image/jpeg;base64,${b64}`;
+  });
+}
+
 // Turns the AI's fixed-format reply into { verdict, summary, sections[] }.
 function parsePlanReport(out) {
   const text = (out || "").replace(/\*\*/g, "");
@@ -1253,12 +1298,36 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
 
       // Request-size budget: the plan file goes first, then site photos from
       // the most recent days backwards until the budget is used up.
-      const BUDGET = 3200000; // base64 characters, stays under the server's upload limit
+      const BUDGET = 3000000; // base64 characters, stays under the server's 4.5 MB upload limit
+      const PLAN_MAX = 1500000; // leave at least half the budget for site photos
       const planMime = planFile.type || "application/octet-stream";
       const planSendable = planMime.startsWith("image/") || planMime === "application/pdf";
       const images = [];
       let used = 0;
-      if (planSendable) { images.push({ data: planFile.b64, mimeType: planMime }); used += planFile.b64.length; }
+      let planPages = 0; // >0 when a big PDF was turned into page images
+      let planTotalPages = 0;
+      if (planSendable) {
+        if (planMime === "application/pdf" && planFile.b64.length > PLAN_MAX) {
+          setCheckStep("Plan PDF is large — preparing its pages…");
+          let res = await pdfToImages(planFile.b64);
+          let size = res.images.reduce((n, d) => n + d.length, 0);
+          if (size > PLAN_MAX) {
+            res = await pdfToImages(planFile.b64, { maxPages: 3, width: 1400, quality: 0.7 });
+            size = res.images.reduce((n, d) => n + d.length, 0);
+          }
+          res.images.forEach((data) => images.push({ data, mimeType: "image/jpeg" }));
+          used += size;
+          planPages = res.images.length;
+          planTotalPages = res.totalPages;
+        } else if (planMime.startsWith("image/") && planFile.b64.length > PLAN_MAX) {
+          const data = await shrinkBase64Image(planFile.b64, 1800, 0.75);
+          images.push({ data, mimeType: "image/jpeg" });
+          used += data.length;
+        } else {
+          images.push({ data: planFile.b64, mimeType: planMime });
+          used += planFile.b64.length;
+        }
+      }
       const photoLabels = [];
       for (const p of [...entries].reverse()) {
         if (!p.photoSlots?.length) continue;
@@ -1275,9 +1344,14 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
       }
 
       setCheckStep("AI is comparing the site against the plan…");
+      const planCount = planSendable ? Math.max(planPages, 1) : 0;
       const attachList = [
-        planSendable ? "Attachment 1: the FINAL APPROVED PLAN (" + planFile.name + ")." : "The plan file (" + planFile.name + ") could not be attached in this format — rely on the notes below.",
-        ...photoLabels.map((l, i) => `Attachment ${i + (planSendable ? 2 : 1)}: site photo, ${l}.`),
+        !planSendable
+          ? "The plan file (" + planFile.name + ") could not be attached in this format — rely on the notes below."
+          : planPages
+          ? `Attachments 1-${planPages}: pages of the FINAL APPROVED PLAN (${planFile.name})${planTotalPages > planPages ? `, first ${planPages} of ${planTotalPages} pages` : ""}.`
+          : "Attachment 1: the FINAL APPROVED PLAN (" + planFile.name + ").",
+        ...photoLabels.map((l, i) => `Attachment ${i + planCount + 1}: site photo, ${l}.`),
       ].join("\n");
 
       const text = `You are an experienced, strict site engineer reviewing a house under construction in Bangalore, India, for the homeowner, who lives abroad and cannot visit. Compare EVERYTHING logged so far against the final approved plan.
@@ -1317,7 +1391,7 @@ Keep every point short and specific. Write "- Nothing noted" under a heading if 
       await saveKey("meta", next);
     } catch (e) {
       console.error("[SiteLedger] Plan cross-check failed", e);
-      setCheckError("Could not complete the cross-check — try again in a moment.");
+      setCheckError(`Could not complete the cross-check. ${e?.message || ""}`.trim());
     }
     setCheckStep("");
     setChecking(false);
