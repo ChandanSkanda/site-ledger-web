@@ -1061,12 +1061,96 @@ function ProgressCard({ entry, onRecheck }) {
   );
 }
 
+// Turns the AI's fixed-format reply into { verdict, summary, sections[] }.
+function parsePlanReport(out) {
+  const text = (out || "").replace(/\*\*/g, "");
+  const v = text.match(/VERDICT:\s*(RED\s*FLAG|WATCH|ON\s*TRACK)/i);
+  const word = v ? v[1].toUpperCase().replace(/\s+/g, " ") : "WATCH";
+  const verdict = word === "RED FLAG" ? "Red Flag" : word === "ON TRACK" ? "On Track" : "Watch";
+  const sm = text.match(/SUMMARY:\s*([\s\S]*?)(?:\n[A-Z][A-Z &'\/]+:|$)/);
+  const headings = ["MATCHES PLAN", "DOESN'T MATCH / BEHIND", "SAFETY & QUALITY", "ASK THE BUILDER"];
+  const sections = [];
+  headings.forEach((h, i) => {
+    const startIdx = text.toUpperCase().indexOf(h + ":");
+    if (startIdx < 0) return;
+    let endIdx = text.length;
+    headings.slice(i + 1).forEach((n) => {
+      const j = text.toUpperCase().indexOf(n + ":", startIdx + 1);
+      if (j > -1 && j < endIdx) endIdx = j;
+    });
+    const points = text
+      .slice(startIdx + h.length + 1, endIdx)
+      .split("\n")
+      .map((l) => l.replace(/^\s*[-•*]\s*/, "").trim())
+      .filter((l) => l && !/^nothing noted\.?$/i.test(l));
+    sections.push({ title: h, points });
+  });
+  return {
+    verdict,
+    summary: sm ? sm[1].trim() : "",
+    sections,
+    // If the AI ignored the format, keep the raw text so nothing is lost.
+    raw: sections.length ? "" : text.trim(),
+  };
+}
+
+const VERDICT_STYLE = {
+  "Red Flag": { tone: "red", color: C.red },
+  Watch: { tone: "yellow", color: C.yellow },
+  "On Track": { tone: "green", color: C.green },
+};
+const SECTION_COLOR = {
+  "MATCHES PLAN": C.green,
+  "DOESN'T MATCH / BEHIND": C.red,
+  "SAFETY & QUALITY": C.yellow,
+  "ASK THE BUILDER": C.navy,
+};
+
+function PlanReport({ report }) {
+  const vs = VERDICT_STYLE[report.verdict] || VERDICT_STYLE.Watch;
+  const when = report.checkedAt ? new Date(report.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${C.line}`, borderLeft: `4px solid ${vs.color}` }} className="mt-4 rounded-md p-4">
+      <div className="flex items-center gap-3 flex-wrap mb-2">
+        <Stamp tone={vs.tone}>{report.verdict}</Stamp>
+        <span style={{ color: C.concrete }} className="text-xs">
+          Checked {when} · {report.entryCount} log {report.entryCount === 1 ? "entry" : "entries"} · {report.photoCount} photos reviewed
+        </span>
+      </div>
+      {report.summary && (
+        <p style={{ color: C.ink }} className="text-sm mb-3 flex gap-1.5">
+          <Sparkles size={14} className="shrink-0 mt-0.5" /> <span>{report.summary}</span>
+        </p>
+      )}
+      <div className="grid gap-3 md:grid-cols-2">
+        {report.sections.map((sec) => (
+          <div key={sec.title}>
+            <div style={{ color: SECTION_COLOR[sec.title] || C.ink, fontFamily: "'Oswald', sans-serif" }} className="uppercase text-xs font-semibold tracking-wide mb-1">
+              {sec.title}
+            </div>
+            {sec.points.length ? (
+              <ul className="space-y-1">
+                {sec.points.map((pt, i) => (
+                  <li key={i} style={{ color: C.ink, borderLeft: `2px solid ${SECTION_COLOR[sec.title] || C.line}` }} className="text-xs pl-2">{pt}</li>
+                ))}
+              </ul>
+            ) : (
+              <p style={{ color: C.concrete }} className="text-xs italic">Nothing noted</p>
+            )}
+          </div>
+        ))}
+      </div>
+      {report.raw && <p style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-sm">{report.raw}</p>}
+    </div>
+  );
+}
+
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
-  const [planDraft, setPlanDraft] = useState(meta.planText || "");
   const [planFile, setPlanFile] = useState(meta.planFile || null);
   const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [review, setReview] = useState("");
+  const [checkStep, setCheckStep] = useState("");
+  const [checkError, setCheckError] = useState("");
   const planFileRef = useRef();
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
@@ -1119,18 +1203,13 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
     runReview(entry, photos);
   };
 
-  const savePlan = async () => {
-    const next = { ...meta, planText: planDraft };
-    setMeta(next);
-    await saveKey("meta", next);
-  };
-
   const onPickPlanFile = async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
     if (!file) return;
     const isImage = file.type.startsWith("image/");
-    const b64 = isImage ? await compressImage(file, 1000, 0.75) : await fileToBase64(file);
+    // Plans are drawings with small text, so keep images sharper than site photos.
+    const b64 = isImage ? await compressImage(file, 2000, 0.85) : await fileToBase64(file);
     const nextFile = { name: file.name, type: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), b64 };
     setPlanFile(nextFile);
     const next = { ...meta, planFile: nextFile };
@@ -1154,25 +1233,93 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
     await saveKey("meta", next);
   };
 
+  // Compares the WHOLE daily log (text, AI flags, and as many site photos as
+  // fit in one request) against the uploaded final plan, and saves the
+  // report so everyone on the project sees the latest one.
   const crossCheck = async () => {
-    if (!planDraft.trim() && !planFile) return;
+    if (!planFile) return;
     setChecking(true);
-    setReview("");
+    setCheckError("");
     try {
-      const log = progress
-        .slice(0, 40)
-        .map((p) => `${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || ""} [flag: ${p.flag || "None"}]`)
+      setCheckStep("Gathering the daily log and photos…");
+      const entries = [...progressRef.current].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      const log = entries
+        .map((p, i) => {
+          const photoNote = p.photoSlots?.length ? ` [photos: ${p.photoSlots.map((k) => (k === "start" ? "start of day" : "end of day")).join(" + ")}]` : "";
+          const aiNote = p.flagReason ? ` | Daily AI check: ${p.flag} — ${p.flagReason}` : "";
+          return `#${i + 1} ${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || "(no notes)"}${photoNote}${aiNote}`;
+        })
         .join("\n");
-      const out = await askClaude({
-        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft || "(see attached plan file)"}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
-        ...(planFile && (planFile.type.startsWith("image/") || planFile.type === "application/pdf")
-          ? { images: [{ data: planFile.b64, mimeType: planFile.type }] }
-          : {}),
-      });
-      setReview(out);
+
+      // Request-size budget: the plan file goes first, then site photos from
+      // the most recent days backwards until the budget is used up.
+      const BUDGET = 3200000; // base64 characters, stays under the server's upload limit
+      const planMime = planFile.type || "application/octet-stream";
+      const planSendable = planMime.startsWith("image/") || planMime === "application/pdf";
+      const images = [];
+      let used = 0;
+      if (planSendable) { images.push({ data: planFile.b64, mimeType: planMime }); used += planFile.b64.length; }
+      const photoLabels = [];
+      for (const p of [...entries].reverse()) {
+        if (!p.photoSlots?.length) continue;
+        const pics = await loadKey(progressPhotoKey(p.id), null);
+        for (const slot of PHOTO_SLOTS) {
+          const data = pics?.[slot.key];
+          if (!data) continue;
+          if (used + data.length > BUDGET) break;
+          images.push({ data, mimeType: "image/jpeg" });
+          used += data.length;
+          photoLabels.push(`${p.date} ${p.stage} — ${slot.label.toLowerCase()}`);
+        }
+        if (used > BUDGET * 0.95) break;
+      }
+
+      setCheckStep("AI is comparing the site against the plan…");
+      const attachList = [
+        planSendable ? "Attachment 1: the FINAL APPROVED PLAN (" + planFile.name + ")." : "The plan file (" + planFile.name + ") could not be attached in this format — rely on the notes below.",
+        ...photoLabels.map((l, i) => `Attachment ${i + (planSendable ? 2 : 1)}: site photo, ${l}.`),
+      ].join("\n");
+
+      const text = `You are an experienced, strict site engineer reviewing a house under construction in Bangalore, India, for the homeowner, who lives abroad and cannot visit. Compare EVERYTHING logged so far against the final approved plan.
+
+${attachList}
+
+Stages marked complete by the homeowner: ${(meta.completedStages || []).join(", ") || "none"}
+${meta.planText ? `Extra plan notes from the homeowner: ${meta.planText}\n` : ""}Today's date: ${today()}
+
+Full daily progress log (oldest first):
+${log || "(no entries yet)"}
+
+Check carefully:
+- Does the work in the photos match the plan (layout, dimensions you can judge, setbacks, number of floors, room positions, materials)?
+- Is the work in the right sequence, and are any stages behind the plan's timeline?
+- Do the log notes match what the photos actually show (including dates printed on photos)?
+- Safety and workmanship problems visible in photos.
+- Gaps: days with no entries, stages logged with no photos, anything missing you'd want evidence for.
+
+Reply in EXACTLY this format, plain text, no markdown symbols other than "- " bullets:
+VERDICT: ON TRACK or WATCH or RED FLAG
+SUMMARY: two or three sentences a homeowner can understand.
+MATCHES PLAN:
+- point
+DOESN'T MATCH / BEHIND:
+- point (mention the log date)
+SAFETY & QUALITY:
+- point
+ASK THE BUILDER:
+- question
+Keep every point short and specific. Write "- Nothing noted" under a heading if there is nothing.`;
+
+      const out = await askClaude({ text, images });
+      const report = { ...parsePlanReport(out), checkedAt: new Date().toISOString(), entryCount: entries.length, photoCount: photoLabels.length };
+      const next = { ...meta, planReview: report };
+      setMeta(next);
+      await saveKey("meta", next);
     } catch (e) {
-      setReview("Could not complete the review — try again in a moment.");
+      console.error("[SiteLedger] Plan cross-check failed", e);
+      setCheckError("Could not complete the cross-check — try again in a moment.");
     }
+    setCheckStep("");
     setChecking(false);
   };
 
@@ -1213,19 +1360,12 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           Building plan &amp; schedule
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-2">
-          Paste your approved plan, stage-wise timeline, or key milestones here, or upload the plan/schedule file itself. Claude will cross-question your day-to-day log against it.
+          Upload the final approved plan (PDF or a photo/scan of the drawing). The cross-check compares every daily log entry and site photo against it.
         </p>
-        <textarea
-          style={{ ...inputStyle, minHeight: "90px" }}
-          value={planDraft}
-          onChange={(e) => setPlanDraft(e.target.value)}
-          onBlur={savePlan}
-          placeholder="e.g. Foundation by 15 Sep, Superstructure by 30 Nov, Roof slab by 15 Jan…"
-        />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" ref={planFileRef} className="hidden" onChange={onPickPlanFile} />
           <Btn onClick={() => planFileRef.current.click()} tone="ghost" small>
-            <Paperclip size={14} /> {planFile ? "Replace file" : "Upload plan / schedule file"}
+            <Paperclip size={14} /> {planFile ? "Replace plan" : "Upload final plan"}
           </Btn>
           {planFile && (
             <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
@@ -1246,16 +1386,15 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           <FilePreview file={{ name: planFile.name, mimeType: planFile.type, data: planFile.b64 }} onClose={() => setPlanFilePreview(false)} />
         )}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <Btn onClick={crossCheck} disabled={checking || (!planDraft.trim() && !planFile)} tone="rust">
+          <Btn onClick={crossCheck} disabled={checking || !planFile} tone="rust">
             {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
             Cross-check progress vs. plan
           </Btn>
+          {checking && <span style={{ color: C.concrete }} className="text-xs">{checkStep}</span>}
+          {!planFile && <span style={{ color: C.concrete }} className="text-xs">Upload the final plan first.</span>}
         </div>
-        {review && (
-          <div style={{ background: "#fff", border: `1px solid ${C.line}`, whiteSpace: "pre-wrap" }} className="mt-4 rounded-md p-3 text-sm">
-            {review}
-          </div>
-        )}
+        {checkError && <p style={{ color: C.red }} className="text-xs mt-2">{checkError}</p>}
+        {meta.planReview && <PlanReport report={meta.planReview} />}
       </div>
 
       <ListSection

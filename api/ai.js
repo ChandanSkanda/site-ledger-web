@@ -17,6 +17,9 @@
 // port this same logic — it's a thin proxy, nothing Vercel-specific except
 // the export shape.
 
+// Plan cross-checks send many photos at once and can take a while.
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Use POST" });
@@ -96,7 +99,7 @@ async function callAnthropic({ text, files, useSearch, apiKey }) {
 
   const body = {
     model: "claude-sonnet-5",
-    max_tokens: 1000,
+    max_tokens: 2500,
     messages: [{ role: "user", content }],
   };
   if (useSearch) {
