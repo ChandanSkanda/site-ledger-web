@@ -26,6 +26,10 @@ const FONTS = `
 ::-webkit-scrollbar-thumb { background: #CFC8B6; border-radius: 999px; border: 2px solid #E7E2D3; }
 ::-webkit-scrollbar-thumb:hover { background: #B7451F; }
 
+/* Tab bar scrolls sideways on narrow screens, but without a visible bar. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 input, select, textarea {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -2594,7 +2598,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
               )}
             </div>
           </div>
-          <nav className="flex gap-1 overflow-x-auto pb-0 -mb-px">
+          <nav className="no-scrollbar flex gap-1 overflow-x-auto pb-0 -mb-px">
             {[...TABS.filter((t) => (ROLE_TAB_ACCESS[currentUser?.role] || ROLE_TAB_ACCESS.other).includes(t.key)), ...(currentUser?.role === "owner" ? OWNER_TABS : [])].map((t) => {
               const Icon = t.icon;
               const active = tab === t.key;
