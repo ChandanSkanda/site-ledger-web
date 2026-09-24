@@ -1497,9 +1497,43 @@ Keep every point short and specific. Write "- Nothing noted" under a heading if 
 }
 
 /* ---------------------------------------------------------------------- */
-/*  Gallery tab (AI photo review)                                           */
+/*  Gallery tab — every image in the project, grouped by where it came from */
 /* ---------------------------------------------------------------------- */
-function GalleryTab({ gallery, setGallery }) {
+const isImageFile = (f) => !!f?.data && (f.mimeType || "").startsWith("image/");
+
+// Small clickable thumbnail for a file attached to a card (image or PDF).
+function AttachmentThumb({ file, label }) {
+  const [open, setOpen] = useState(false);
+  const img = isImageFile(file);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} className="mt-2 flex items-center gap-2 text-xs underline" style={{ color: C.navy }}>
+        {img ? (
+          <img src={`data:${file.mimeType};base64,${file.data}`} alt={label} className="rounded object-cover" style={{ width: 44, height: 44, border: `1px solid ${C.line}` }} />
+        ) : (
+          <Paperclip size={13} />
+        )}
+        {label}
+      </button>
+      {open && <FilePreview file={file} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+const GALLERY_SECTIONS = [
+  { key: "all", label: "All" },
+  { key: "site", label: "Site photos" },
+  { key: "progress", label: "Progress" },
+  { key: "expenses", label: "Expenses" },
+  { key: "products", label: "Products" },
+  { key: "documents", label: "Documents" },
+];
+const SECTION_TONE = { site: "concrete", progress: "green", expenses: "red", products: "yellow", documents: "navy" };
+
+function GalleryTab({ gallery, setGallery, progress, expenses, products, documents, canSeeTab, currentUser }) {
+  const [section, setSection] = useState("all");
+  const [progressPhotos, setProgressPhotos] = useState({}); // entryId -> {start,end}
+  const [preview, setPreview] = useState(null);
   const [pending, setPending] = useState(null); // {b64, date}
   const [analyzing, setAnalyzing] = useState(false);
   const fileRef = useRef();
@@ -1539,21 +1573,94 @@ function GalleryTab({ gallery, setGallery }) {
     await saveKey("gallery", next);
   };
 
+
+  // Progress photos live under their own keys — fetch them once.
+  useEffect(() => {
+    let alive = true;
+    const withPhotos = progress.filter((p) => p.photoSlots?.length && !progressPhotos[p.id]);
+    if (!withPhotos.length) return;
+    Promise.all(withPhotos.map((p) => loadKey(progressPhotoKey(p.id), null).then((ph) => [p.id, ph || {}]))).then((pairs) => {
+      if (alive) setProgressPhotos((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
+    });
+    return () => { alive = false; };
+  }, [progress]);
+
+  // Build one list of tiles from every part of the app this person may see.
+  const tiles = [];
+  gallery.forEach((g) => tiles.push({ id: `g-${g.id}`, section: "site", date: g.date, title: "Site photo", note: g.note, file: { name: `Site photo ${g.date}`, mimeType: "image/jpeg", data: g.b64 }, galleryId: g.id }));
+  progress.forEach((p) => {
+    PHOTO_SLOTS.forEach((slot) => {
+      if (!p.photoSlots?.includes(slot.key)) return;
+      const data = progressPhotos[p.id]?.[slot.key];
+      tiles.push({ id: `p-${p.id}-${slot.key}`, section: "progress", date: p.date, title: `${p.stage} · ${slot.label}`, note: p.description, loading: !data, file: data ? { name: `${p.date} ${p.stage} ${slot.label}`, mimeType: "image/jpeg", data } : null });
+    });
+  });
+  if (canSeeTab("budget")) {
+    expenses.forEach((e) => {
+      if (!e.receipt?.data) return;
+      tiles.push({ id: `e-${e.id}`, section: "expenses", date: e.date, title: `${fmtINR(e.amount)} · ${e.category || "Expense"}`, note: [e.description, e.paidTo && `Paid to ${e.paidTo}`].filter(Boolean).join(" · "), file: e.receipt });
+    });
+  }
+  if (canSeeTab("products")) {
+    products.forEach((p) => {
+      if (!isImageFile(p.image)) return;
+      tiles.push({ id: `pr-${p.id}`, section: "products", date: "", title: p.item, note: [p.brand, p.room].filter(Boolean).join(" · "), file: p.image });
+    });
+  }
+  if (canSeeTab("documents")) {
+    documents.forEach((d) => {
+      if (!isImageFile(d.attachment) || !canSeeDocument(d, currentUser)) return;
+      tiles.push({ id: `d-${d.id}`, section: "documents", date: d.date, title: d.title, note: d.type, file: d.attachment });
+    });
+  }
+  tiles.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+  const sections = GALLERY_SECTIONS.filter((s) =>
+    s.key === "all" || s.key === "site" || s.key === "progress" ||
+    (s.key === "expenses" && canSeeTab("budget")) || (s.key === "products" && canSeeTab("products")) || (s.key === "documents" && canSeeTab("documents"))
+  );
+  const count = (k) => (k === "all" ? tiles.length : tiles.filter((t) => t.section === k).length);
+  const shown = section === "all" ? tiles : tiles.filter((t) => t.section === section);
+  const sectionLabel = (k) => GALLERY_SECTIONS.find((s) => s.key === k)?.label;
+
   return (
     <div>
       <SectionHeader
         icon={Camera}
         title="Photo gallery"
-        subtitle="Upload the builder's daily photos — Claude reviews people, stage, and red flags"
+        subtitle="Every photo in the project — site photos, progress, payments, products and documents"
         action={
           <>
             <input type="file" accept="image/*" ref={fileRef} className="hidden" onChange={onPick} />
             <Btn onClick={() => fileRef.current.click()}>
-              <Plus size={16} /> Add photo
+              <Plus size={16} /> Add site photo
             </Btn>
           </>
         }
       />
+
+      <div className="flex flex-wrap gap-2 mb-4">
+        {sections.map((s) => {
+          const active = section === s.key;
+          const n = count(s.key);
+          return (
+            <button
+              key={s.key}
+              onClick={() => setSection(s.key)}
+              style={{
+                background: active ? C.navy : C.card,
+                color: active ? "#fff" : C.ink,
+                border: `1px solid ${active ? C.navy : C.line}`,
+                opacity: n === 0 && !active ? 0.55 : 1,
+                transition: "background 150ms, color 150ms",
+              }}
+              className="rounded-full px-3 py-1 text-xs font-semibold"
+            >
+              {s.label} <span style={{ fontFamily: "'IBM Plex Mono', monospace", opacity: 0.75 }}>{n}</span>
+            </button>
+          );
+        })}
+      </div>
 
       {pending && (
         <Modal title="Review photo" onClose={() => setPending(null)}>
@@ -1575,21 +1682,36 @@ function GalleryTab({ gallery, setGallery }) {
         </Modal>
       )}
 
-      {gallery.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">No photos yet.</p>}
+      {shown.length === 0 && (
+        <p style={{ color: C.concrete }} className="text-sm italic">
+          {section === "all" ? "No photos yet." : `No ${sectionLabel(section).toLowerCase()} photos yet.`}
+        </p>
+      )}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {gallery.map((g) => (
-          <div key={g.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg overflow-hidden">
-            <img src={`data:image/jpeg;base64,${g.b64}`} className="w-full object-cover" style={{ height: 160 }} />
+        {shown.map((t) => (
+          <div key={t.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg overflow-hidden">
+            <button type="button" onClick={() => t.file && setPreview(t.file)} className="relative block w-full" style={{ height: 180, background: C.paperDark }}>
+              {t.file ? (
+                <img src={`data:${t.file.mimeType};base64,${t.file.data}`} alt={t.title} className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center"><Loader2 size={18} className="animate-spin" style={{ color: C.concrete }} /></div>
+              )}
+              <span className="absolute top-2 left-2 rounded" style={{ background: "rgba(245,242,233,0.94)", padding: "2px 3px" }}><Stamp tone={SECTION_TONE[t.section]}>{sectionLabel(t.section)}</Stamp></span>
+            </button>
             <div className="p-3">
-              <div className="flex items-center justify-between mb-1">
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{g.date}</span>
-                <button onClick={() => remove(g.id)} style={{ color: C.concrete }}><Trash2 size={14} /></button>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="text-sm font-semibold uppercase truncate">{t.title}</span>
+                {t.galleryId && (
+                  <button onClick={() => { if (window.confirm("Delete this photo?")) remove(t.galleryId); }} style={{ color: C.concrete }} className="shrink-0 hover:text-red-600"><Trash2 size={14} /></button>
+                )}
               </div>
-              <p style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-xs">{g.note}</p>
+              {t.date && <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs mb-1">{t.date}</div>}
+              {t.note && <p style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-xs" >{t.note}</p>}
             </div>
           </div>
         ))}
       </div>
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -1604,6 +1726,7 @@ const expenseSchema = [
   { key: "amount", label: "Amount (₹)", type: "number", required: true },
   { key: "paidTo", label: "Paid to", type: "text" },
   { key: "mode", label: "Mode", type: "select", options: ["Cash", "UPI", "Bank Transfer", "Cheque", "Card"] },
+  { key: "receipt", label: "Payment screenshot / receipt (optional)", type: "file", accept: "image/*,.pdf" },
 ];
 const loanEntrySchema = [
   { key: "date", label: "Date", type: "date", required: true },
@@ -1791,13 +1914,14 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         addLabel="Add expense"
         renderCard={(e) => (
           <div>
-            <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center justify-between mb-1 pr-16">
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{e.date}</span>
               <Stamp tone="navy">{e.category}</Stamp>
             </div>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(e.amount)}</div>
             <p style={{ color: C.ink }} className="text-sm">{e.description}</p>
             {e.paidTo && <p style={{ color: C.concrete }} className="text-xs mt-1">Paid to {e.paidTo} · {e.mode}</p>}
+            {e.receipt && <AttachmentThumb file={e.receipt} label="Payment proof" />}
           </div>
         )}
       />
@@ -1832,7 +1956,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
               addLabel="Add loan entry"
               renderCard={(l) => (
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1 pr-16">
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{l.date}</span>
                     <Stamp tone="navy">{l.type}</Stamp>
                   </div>
@@ -1874,7 +1998,7 @@ function PermissionsTab({ permissions, setPermissions }) {
       addLabel="Add permission"
       renderCard={(p) => (
         <div>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-1 pr-16">
             <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.name}</span>
             <Stamp tone={statusTone[p.status] || "concrete"}>{p.status}</Stamp>
           </div>
@@ -1912,7 +2036,7 @@ function PeopleTab({ contacts, setContacts }) {
       addLabel="Add contact"
       renderCard={(c) => (
         <div>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-1 pr-16">
             <Stamp tone="navy">{c.role}</Stamp>
           </div>
           <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm mt-1">{c.name}</div>
@@ -2072,6 +2196,14 @@ function ProductsTab({ products, setProducts }) {
 /* ---------------------------------------------------------------------- */
 /*  Documents tab (bills & agreements)                                     */
 /* ---------------------------------------------------------------------- */
+// Who can see a document — used by the Documents tab and the Gallery.
+function canSeeDocument(d, currentUser) {
+  if (currentUser?.role === "owner") return true;
+  if (d.type === "Design") return true;
+  if (d.type === "Agreement") return currentUser?.role === "builder";
+  return !!d.uploadedBy && d.uploadedBy === currentUser?.id;
+}
+
 const DOCUMENT_TYPES = ["Bill", "Agreement", "Receipt", "Design", "Other"];
 
 const documentSchema = [
@@ -2096,12 +2228,7 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
   // the builder and the owner only. Designs (drawings, plans, elevations)
   // are shared with everyone on the project, since the whole site team
   // needs to build from them.
-  const canSee = (d) => {
-    if (isOwner) return true;
-    if (d.type === "Design") return true;
-    if (d.type === "Agreement") return currentUser?.role === "builder";
-    return !!d.uploadedBy && d.uploadedBy === currentUser?.id;
-  };
+  const canSee = (d) => canSeeDocument(d, currentUser);
   const visible = documents.filter(canSee);
   const countFor = (t) => (t === "All" ? visible.length : visible.filter((d) => d.type === t).length);
   const shown = typeFilter === "All" ? visible : visible.filter((d) => d.type === typeFilter);
@@ -2239,7 +2366,7 @@ function IssuesTab({ issues, setIssues }) {
       addLabel="Log a hiccup"
       renderCard={(i) => (
         <div>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-1 pr-16">
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{i.date}</span>
             <Stamp tone={i.status === "Resolved" ? "green" : "yellow"}>{i.status || "Open"}</Stamp>
           </div>
@@ -2498,7 +2625,13 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
       <main className="max-w-6xl mx-auto px-4 py-6">
         {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} />}
         {tab === "progress" && <ProgressTab progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta} />}
-        {tab === "gallery" && <GalleryTab gallery={gallery} setGallery={setGallery} />}
+        {tab === "gallery" && (
+          <GalleryTab
+            gallery={gallery} setGallery={setGallery}
+            progress={progress} expenses={expenses} products={products} documents={documents}
+            canSeeTab={canSee} currentUser={currentUser}
+          />
+        )}
         {tab === "budget" && canSee("budget") && (
           <BudgetTab
             expenses={expenses} setExpenses={setExpenses}
