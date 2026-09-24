@@ -804,7 +804,7 @@ function Dashboard({ data, setTab, currentUser }) {
         <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mt-6">
           <div style={{ color: C.concrete }} className="text-xs uppercase tracking-wide font-semibold mb-1">Home loan</div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-sm">
-            Sanctioned {fmtINR(loan.sanctioned)} · Disbursed {fmtINR(loan.disbursed)}
+            Sanctioned {fmtINR(loan.sanctioned)} · Disbursed {fmtINR(loanDisbursed(loan))}
           </div>
         </div>
       )}
@@ -1534,7 +1534,7 @@ const GALLERY_SECTIONS = [
 ];
 const SECTION_TONE = { site: "concrete", progress: "green", expenses: "red", products: "yellow", documents: "navy" };
 
-function GalleryTab({ gallery, setGallery, progress, expenses, products, documents, canSeeTab, currentUser }) {
+function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, documents, canSeeTab, currentUser }) {
   const [section, setSection] = useState("all");
   const [progressPhotos, setProgressPhotos] = useState({}); // entryId -> {start,end}
   const [preview, setPreview] = useState(null);
@@ -1603,6 +1603,10 @@ function GalleryTab({ gallery, setGallery, progress, expenses, products, documen
     expenses.forEach((e) => {
       if (!e.receipt?.data) return;
       tiles.push({ id: `e-${e.id}`, section: "expenses", date: e.date, title: `${fmtINR(e.amount)} · ${e.category || "Expense"}`, note: [e.description, e.paidTo && `Paid to ${e.paidTo}`].filter(Boolean).join(" · "), file: e.receipt });
+    });
+    (loan?.enabled ? loan.entries || [] : []).forEach((l) => {
+      if (!isImageFile(l.proof)) return;
+      tiles.push({ id: `l-${l.id}`, section: "expenses", date: l.date, title: `${fmtINR(l.amount)} · Loan ${l.type || "entry"}`, note: l.notes, file: l.proof });
     });
   }
   if (canSeeTab("products")) {
@@ -1736,8 +1740,18 @@ const loanEntrySchema = [
   { key: "date", label: "Date", type: "date", required: true },
   { key: "type", label: "Type", type: "select", options: ["Sanction", "Disbursement", "EMI Paid", "Other"], required: true },
   { key: "amount", label: "Amount (₹)", type: "number", required: true },
+  { key: "proof", label: "Proof — screenshot or bank statement (optional)", type: "file", accept: "image/*,.pdf" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
+
+// "Disbursed so far" is the total of all Disbursement entries. Older
+// projects typed it in by hand — that number is used only until the first
+// Disbursement entry is logged.
+function loanDisbursed(loan) {
+  const disb = (loan?.entries || []).filter((e) => e.type === "Disbursement");
+  if (!disb.length) return Number(loan?.disbursed || 0);
+  return disb.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+}
 
 function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, setLoan, agreement, setAgreement }) {
   const [budgetDraft, setBudgetDraft] = useState(meta.budgetAllocated || "");
@@ -1942,13 +1956,40 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         </div>
         {loan.enabled && (
           <div>
-            <div className="grid gap-4 sm:grid-cols-2 mb-4">
-              <Field label="Sanctioned amount (₹)">
+            <div className="grid gap-4 sm:grid-cols-2 mb-4 items-end">
+              <Field label="Total sanctioned amount (₹)">
                 <input style={inputStyle} type="number" defaultValue={loan.sanctioned} onBlur={(e) => updateLoanField("sanctioned", e.target.value)} />
               </Field>
-              <Field label="Disbursed so far (₹)">
-                <input style={inputStyle} type="number" defaultValue={loan.disbursed} onBlur={(e) => updateLoanField("disbursed", e.target.value)} />
-              </Field>
+              {(() => {
+                const disbursed = loanDisbursed(loan);
+                const sanctioned = Number(loan.sanctioned || 0);
+                const pct = sanctioned ? Math.min(100, Math.round((disbursed / sanctioned) * 100)) : 0;
+                const count = (loan.entries || []).filter((e) => e.type === "Disbursement").length;
+                return (
+                  <div className="mb-3">
+                    <div className="flex items-end justify-between gap-3 flex-wrap mb-1.5">
+                      <div>
+                        <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide">Disbursed so far</div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.green }} className="text-lg font-semibold">{fmtINR(disbursed)}</div>
+                      </div>
+                      {sanctioned > 0 && (
+                        <div className="text-right">
+                          <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide">Yet to disburse</div>
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(Math.max(0, sanctioned - disbursed))}</div>
+                        </div>
+                      )}
+                    </div>
+                    {sanctioned > 0 && (
+                      <div style={{ background: C.paperDark, height: 6 }} className="rounded-full overflow-hidden">
+                        <div style={{ width: `${pct}%`, background: C.green, height: "100%" }} />
+                      </div>
+                    )}
+                    <div style={{ color: C.concrete }} className="text-xs mt-1">
+                      {count ? `Auto-calculated from ${count} disbursement ${count === 1 ? "entry" : "entries"}${sanctioned ? ` · ${pct}% of sanction` : ""}` : "Add a loan entry of type “Disbursement” and this updates automatically"}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
             <ListSection
               icon={Landmark}
@@ -1966,6 +2007,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
                   </div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(l.amount)}</div>
                   <p style={{ color: C.ink }} className="text-sm">{l.notes}</p>
+                  {l.proof && <AttachmentThumb file={l.proof} label="Proof" />}
                 </div>
               )}
             />
@@ -2632,7 +2674,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
         {tab === "gallery" && (
           <GalleryTab
             gallery={gallery} setGallery={setGallery}
-            progress={progress} expenses={expenses} products={products} documents={documents}
+            progress={progress} expenses={expenses} loan={loan} products={products} documents={documents}
             canSeeTab={canSee} currentUser={currentUser}
           />
         )}
