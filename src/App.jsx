@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
+  Upload, Download, Paperclip,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -15,6 +16,44 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pi
 /* ---------------------------------------------------------------------- */
 const FONTS = `
 @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+* { box-sizing: border-box; }
+
+::selection { background: #B7451F; color: #fff; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #CFC8B6; border-radius: 999px; border: 2px solid #E7E2D3; }
+::-webkit-scrollbar-thumb:hover { background: #B7451F; }
+
+input, select, textarea {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #16324F !important;
+  box-shadow: 0 0 0 3px rgba(22, 50, 79, 0.14);
+}
+
+button { transition: transform 0.12s ease, box-shadow 0.15s ease, background-color 0.15s ease, opacity 0.15s ease; }
+button:active:not(:disabled) { transform: scale(0.97); }
+
+@keyframes ledgerModalIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes ledgerOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.ledger-modal-overlay { animation: ledgerOverlayIn 0.15s ease; }
+.ledger-modal-panel { animation: ledgerModalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1); }
+
+@keyframes ledgerFadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ledger-fade-up { animation: ledgerFadeUp 0.25s ease both; }
 `;
 const C = {
   navy: "#16324F",
@@ -88,6 +127,15 @@ function compressImage(file, maxWidth = 640, quality = 0.6) {
   });
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 const fmtINR = (n) =>
   "₹" + (Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -115,6 +163,7 @@ function Stamp({ children, tone = "concrete" }) {
         transform: "rotate(-2deg)",
         fontWeight: 600,
         whiteSpace: "nowrap",
+        boxShadow: "1px 2px 3px rgba(0,0,0,0.1)",
       }}
     >
       {children}
@@ -193,24 +242,24 @@ const inputStyle = {
   width: "100%",
   border: `1.5px solid ${C.line}`,
   background: "#fff",
-  borderRadius: "6px",
-  padding: "8px 10px",
+  borderRadius: "7px",
+  padding: "9px 11px",
   fontFamily: "'Inter', sans-serif",
   fontSize: "14px",
   color: C.ink,
 };
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, size }) {
   return (
     <div
-      className="fixed inset-0 flex items-center justify-center p-4 z-50"
-      style={{ background: "rgba(22,50,79,0.55)" }}
+      className="ledger-modal-overlay fixed inset-0 flex items-center justify-center p-4 z-50"
+      style={{ background: "rgba(22,50,79,0.6)", backdropFilter: "blur(1px)" }}
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ background: C.card, maxHeight: "88vh" }}
-        className="w-full max-w-lg rounded-lg shadow-2xl overflow-y-auto"
+        style={{ background: C.card, maxHeight: "94vh" }}
+        className={`ledger-modal-panel w-full ${size === "large" ? "max-w-5xl" : "max-w-lg"} rounded-lg shadow-2xl overflow-y-auto`}
       >
         <div
           style={{ borderBottom: `1px solid ${C.line}`, background: C.card }}
@@ -229,6 +278,52 @@ function Modal({ title, onClose, children }) {
         <div className="p-5">{children}</div>
       </div>
     </div>
+  );
+}
+
+// Shows an uploaded image or PDF inline (in-page), rather than making the
+// browser download it — used anywhere a { name, mimeType, data } file is
+// attached (documents, the plan file, etc).
+function FilePreview({ file, onClose }) {
+  // Build a blob: URL from the stored base64. Browsers (Chrome/Safari)
+  // often refuse to render large data: URLs inside an iframe, which is why
+  // PDFs and bigger scans showed up blank.
+  const blobUrl = useMemo(() => {
+    if (!file?.data) return null;
+    try {
+      const bin = atob(file.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return URL.createObjectURL(new Blob([bytes], { type: file.mimeType || "application/octet-stream" }));
+    } catch (e) {
+      console.error("[SiteLedger] Could not read attached file", e);
+      return null;
+    }
+  }, [file]);
+  useEffect(() => () => blobUrl && URL.revokeObjectURL(blobUrl), [blobUrl]);
+
+  if (!file) return null;
+  const isImage = file.mimeType?.startsWith("image/");
+  const isPdf = file.mimeType === "application/pdf" || /\.pdf$/i.test(file.name || "");
+  const dataUrl = blobUrl || `data:${file.mimeType};base64,${file.data}`;
+  return (
+    <Modal title={file.name} onClose={onClose} size="large">
+      {isImage && <img src={dataUrl} alt={file.name} style={{ maxWidth: "100%", maxHeight: "82vh", display: "block", margin: "0 auto", borderRadius: 6 }} />}
+      {isPdf && <iframe src={dataUrl} title={file.name} style={{ width: "100%", height: "82vh", border: "none" }} />}
+      {!isImage && !isPdf && (
+        <p style={{ color: C.concrete }} className="text-sm mb-3">
+          This file type can't be previewed here — download it to open it.
+        </p>
+      )}
+      <div className="mt-3 flex gap-4">
+        <a href={dataUrl} target="_blank" rel="noreferrer" style={{ color: C.navy }} className="text-xs underline">
+          Open in new tab
+        </a>
+        <a href={dataUrl} download={file.name} style={{ color: C.navy }} className="text-xs underline">
+          Download {file.name}
+        </a>
+      </div>
+    </Modal>
   );
 }
 
@@ -260,6 +355,29 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
             </select>
           ) : f.type === "textarea" ? (
             <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals[f.key]} onChange={(e) => set(f.key, e.target.value)} />
+          ) : f.type === "file" ? (
+            <div>
+              <input
+                type="file"
+                accept={f.accept || "*/*"}
+                onChange={async (e) => {
+                  const file = e.target.files[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  const isImage = file.type.startsWith("image/");
+                  const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
+                  set(f.key, { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data });
+                }}
+              />
+              {vals[f.key] && (
+                <div style={{ color: C.concrete }} className="text-xs mt-1 flex items-center gap-2">
+                  <span>{vals[f.key].name}</span>
+                  <button type="button" onClick={() => set(f.key, null)} style={{ color: C.concrete }} className="hover:text-red-600">
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+            </div>
           ) : (
             <input
               style={inputStyle}
@@ -277,10 +395,83 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
 }
 
 /* ---------------------------------------------------------------------- */
+/*  CSV import / export helpers                                            */
+/* ---------------------------------------------------------------------- */
+function csvEscape(value) {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function toCSV(schema, items) {
+  const header = schema.map((f) => csvEscape(f.label)).join(",");
+  const rows = items.map((item) => schema.map((f) => csvEscape(item[f.key])).join(","));
+  return [header, ...rows].join("\r\n");
+}
+
+function parseCSVText(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      pushField();
+    } else if (c === "\n") {
+      pushField();
+      pushRow();
+    } else if (c === "\r") {
+      // ignore — paired \n handles the row break
+    } else {
+      field += c;
+    }
+  }
+  if (field.length || row.length) { pushField(); pushRow(); }
+  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ""));
+}
+
+function rowsToItems(schema, rows) {
+  if (!rows.length) return { items: [], skipped: 0 };
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const colForField = schema.map((f) => {
+    let idx = header.indexOf(f.label.toLowerCase());
+    if (idx === -1) idx = header.indexOf(f.key.toLowerCase());
+    return idx;
+  });
+  const items = [];
+  let skipped = 0;
+  for (let r = 1; r < rows.length; r++) {
+    const raw = rows[r];
+    if (raw.every((c) => !c || !c.trim())) continue;
+    const obj = { id: uid() };
+    schema.forEach((f, i) => {
+      const idx = colForField[i];
+      obj[f.key] = idx >= 0 && raw[idx] !== undefined ? raw[idx] : "";
+    });
+    const missingRequired = schema.some((f) => f.required && !String(obj[f.key] || "").trim());
+    if (missingRequired) { skipped++; continue; }
+    items.push(obj);
+  }
+  return { items, skipped };
+}
+
+/* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry" }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName }) {
   const [open, setOpen] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
+  const importRef = useRef();
 
   const persist = onPersist || ((next) => saveKey(storageKey, next));
 
@@ -296,6 +487,40 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
     await persist(next);
   };
 
+  const exportCSV = () => {
+    const csv = toCSV(schema, items);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${exportFileName || storageKey}-${today()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importCSV = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCSVText(text);
+      const { items: parsed, skipped } = rowsToItems(schema, rows);
+      if (!parsed.length) {
+        setImportMsg(skipped ? `No rows imported — ${skipped} skipped (missing required fields).` : "No rows found in that file.");
+        return;
+      }
+      const next = [...parsed, ...items];
+      setItems(next);
+      await persist(next);
+      setImportMsg(`Imported ${parsed.length} ${parsed.length === 1 ? "entry" : "entries"}${skipped ? ` — ${skipped} skipped` : ""}.`);
+    } catch {
+      setImportMsg("Could not read that file — make sure it's a CSV exported from here.");
+    }
+  };
+
   return (
     <div>
       <SectionHeader
@@ -303,11 +528,27 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
         title={title}
         subtitle={subtitle}
         action={
-          <Btn onClick={() => setOpen(true)}>
-            <Plus size={16} /> {addLabel}
-          </Btn>
+          <div className="flex items-center gap-2 flex-wrap">
+            {enableImportExport && (
+              <>
+                <input type="file" accept=".csv,text/csv" ref={importRef} className="hidden" onChange={importCSV} />
+                <Btn onClick={() => importRef.current.click()} tone="ghost" small>
+                  <Upload size={14} /> Import CSV
+                </Btn>
+                <Btn onClick={exportCSV} tone="ghost" small disabled={!items.length}>
+                  <Download size={14} /> Export CSV
+                </Btn>
+              </>
+            )}
+            <Btn onClick={() => setOpen(true)}>
+              <Plus size={16} /> {addLabel}
+            </Btn>
+          </div>
         }
       />
+      {enableImportExport && importMsg && (
+        <p style={{ color: C.concrete }} className="text-xs mb-3">{importMsg}</p>
+      )}
       {items.length === 0 && (
         <p style={{ color: C.concrete }} className="text-sm italic">
           Nothing logged yet. Add your first entry.
@@ -536,13 +777,36 @@ const progressSchema = [
 
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
+  const [planFile, setPlanFile] = useState(meta.planFile || null);
+  const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
   const [review, setReview] = useState("");
+  const planFileRef = useRef();
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
 
   const savePlan = async () => {
     const next = { ...meta, planText: planDraft };
+    setMeta(next);
+    await saveKey("meta", next);
+  };
+
+  const onPickPlanFile = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const isImage = file.type.startsWith("image/");
+    const b64 = isImage ? await compressImage(file, 1000, 0.75) : await fileToBase64(file);
+    const nextFile = { name: file.name, type: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), b64 };
+    setPlanFile(nextFile);
+    const next = { ...meta, planFile: nextFile };
+    setMeta(next);
+    await saveKey("meta", next);
+  };
+
+  const removePlanFile = async () => {
+    setPlanFile(null);
+    const next = { ...meta, planFile: null };
     setMeta(next);
     await saveKey("meta", next);
   };
@@ -557,7 +821,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
   };
 
   const crossCheck = async () => {
-    if (!planDraft.trim()) return;
+    if (!planDraft.trim() && !planFile) return;
     setChecking(true);
     setReview("");
     try {
@@ -566,7 +830,10 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         .map((p) => `${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || ""} [flag: ${p.flag || "None"}]`)
         .join("\n");
       const out = await askClaude({
-        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
+        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft || "(see attached plan file)"}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
+        ...(planFile && (planFile.type.startsWith("image/") || planFile.type === "application/pdf")
+          ? { images: [{ data: planFile.b64, mimeType: planFile.type }] }
+          : {}),
       });
       setReview(out);
     } catch (e) {
@@ -612,7 +879,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           Building plan &amp; schedule
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-2">
-          Paste your approved plan, stage-wise timeline, or key milestones here. Claude will cross-question your day-to-day log against it.
+          Paste your approved plan, stage-wise timeline, or key milestones here, or upload the plan/schedule file itself. Claude will cross-question your day-to-day log against it.
         </p>
         <textarea
           style={{ ...inputStyle, minHeight: "90px" }}
@@ -622,7 +889,30 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           placeholder="e.g. Foundation by 15 Sep, Superstructure by 30 Nov, Roof slab by 15 Jan…"
         />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <Btn onClick={crossCheck} disabled={checking || !planDraft.trim()} tone="rust">
+          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" ref={planFileRef} className="hidden" onChange={onPickPlanFile} />
+          <Btn onClick={() => planFileRef.current.click()} tone="ghost" small>
+            <Paperclip size={14} /> {planFile ? "Replace file" : "Upload plan / schedule file"}
+          </Btn>
+          {planFile && (
+            <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
+              <button
+                onClick={() => setPlanFilePreview(true)}
+                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                className="underline"
+              >
+                {planFile.name}
+              </button>
+              <button onClick={removePlanFile} style={{ color: C.concrete }} className="hover:text-red-600">
+                <X size={13} />
+              </button>
+            </span>
+          )}
+        </div>
+        {planFilePreview && (
+          <FilePreview file={{ name: planFile.name, mimeType: planFile.type, data: planFile.b64 }} onClose={() => setPlanFilePreview(false)} />
+        )}
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <Btn onClick={crossCheck} disabled={checking || (!planDraft.trim() && !planFile)} tone="rust">
             {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
             Cross-check progress vs. plan
           </Btn>
@@ -643,6 +933,8 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         setItems={setProgress}
         storageKey="progress"
         addLabel="Log today's progress"
+        enableImportExport
+        exportFileName="daily-progress-log"
         renderCard={(p) => (
           <div>
             <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -679,7 +971,7 @@ function GalleryTab({ gallery, setGallery }) {
     setAnalyzing(true);
     try {
       const out = await askClaude({
-        images: [pending.b64],
+        images: [{ data: pending.b64, mimeType: "image/jpeg" }],
         text: "This is a daily progress photo from a house construction site in Bangalore, India. Look carefully and: 1) count how many people appear to be working / on-site (laborers, masons, engineers etc.) 2) count how many appear to be bystanders/visitors/not working, 3) categorize the stage of construction visible (e.g. demolition, excavation, foundation, structure, plastering, finishing etc.), 4) note anything that looks like a safety issue or something worth flagging, 5) give one short caption line. Answer in short labeled lines, no long paragraphs.",
       });
       setPending((p) => ({ ...p, note: out }));
@@ -1099,26 +1391,46 @@ const productSchema = [
   { key: "item", label: "Item", type: "text", required: true },
   { key: "room", label: "Room / area", type: "text" },
   { key: "brand", label: "Brand / model", type: "text" },
+  { key: "productId", label: "Product ID / material no. (optional)", type: "text" },
   { key: "price", label: "Price paid (₹)", type: "number" },
   { key: "claimedPrice", label: "Builder's quoted price (₹)", type: "number" },
   { key: "vendor", label: "Vendor / shop", type: "text" },
+  { key: "image", label: "Photo (helps you identify the exact product later)", type: "file", accept: "image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
 function ProductsTab({ products, setProducts }) {
   const [checkItem, setCheckItem] = useState("");
+  const [checkId, setCheckId] = useState("");
   const [checkPrice, setCheckPrice] = useState("");
+  const [checkImage, setCheckImage] = useState(null);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState("");
+  const [preview, setPreview] = useState(null);
+  const checkImageRef = useRef();
+
+  const onPickCheckImage = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const data = await compressImage(file, 1000, 0.75);
+    setCheckImage({ name: file.name, mimeType: "image/jpeg", data });
+  };
 
   const runCheck = async () => {
-    if (!checkItem.trim()) return;
+    if (!checkItem.trim() && !checkImage) return;
     setChecking(true);
     setResult("");
     try {
+      const idPart = checkId.trim() ? ` (product ID / model number: "${checkId.trim()}")` : "";
+      const pricePart = checkPrice ? ` at ₹${checkPrice}` : "";
+      const text = checkImage
+        ? `A construction builder in Bangalore, India quoted this item${checkItem.trim() ? `: "${checkItem}"` : ""}${idPart}${pricePart}. A photo of the item is attached — use it to identify the exact product (brand, type, likely model) if that isn't already clear from the description. Then search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) what you think the product is, 2) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 3) 2-3 specific alternative brands/models at a similar or better price, 4) a one-line verdict. Keep it short and practical.`
+        : `A construction builder in Bangalore, India quoted this item: "${checkItem}"${idPart}${pricePart}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`;
       const out = await askClaude({
         useSearch: true,
-        text: `A construction builder in Bangalore, India quoted this item: "${checkItem}"${checkPrice ? ` at ₹${checkPrice}` : ""}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`,
+        text,
+        ...(checkImage ? { images: [{ data: checkImage.data, mimeType: checkImage.mimeType }] } : {}),
       });
       setResult(out);
     } catch {
@@ -1133,17 +1445,41 @@ function ProductsTab({ products, setProducts }) {
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2 flex items-center gap-2">
           <Search size={16} /> Check a builder's quote
         </h3>
-        <div className="grid gap-3 sm:grid-cols-3 items-end">
+        <p style={{ color: C.concrete }} className="text-xs mb-3">
+          Describe the item, or attach a photo and let AI identify it — either way you'll get a market price check.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Item the builder quoted">
             <input style={inputStyle} value={checkItem} onChange={(e) => setCheckItem(e.target.value)} placeholder="e.g. Kajaria vitrified tile 2x2" />
+          </Field>
+          <Field label="Product ID / model number (optional)">
+            <input style={inputStyle} value={checkId} onChange={(e) => setCheckId(e.target.value)} placeholder="e.g. SKU, batch or model code" />
           </Field>
           <Field label="Their quoted price (₹, optional)">
             <input style={inputStyle} type="number" value={checkPrice} onChange={(e) => setCheckPrice(e.target.value)} />
           </Field>
-          <Btn onClick={runCheck} disabled={checking} tone="rust">
-            {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
-          </Btn>
+          <Field label="Photo (optional)">
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="file" accept="image/*" ref={checkImageRef} className="hidden" onChange={onPickCheckImage} />
+              <Btn onClick={() => checkImageRef.current.click()} tone="ghost" small>
+                <Paperclip size={14} /> {checkImage ? "Replace photo" : "Attach photo"}
+              </Btn>
+              {checkImage && (
+                <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
+                  <button type="button" onClick={() => setPreview(checkImage)} style={{ color: C.navy }} className="underline">
+                    {checkImage.name}
+                  </button>
+                  <button type="button" onClick={() => setCheckImage(null)} style={{ color: C.concrete }} className="hover:text-red-600">
+                    <X size={13} />
+                  </button>
+                </span>
+              )}
+            </div>
+          </Field>
         </div>
+        <Btn onClick={runCheck} disabled={checking || (!checkItem.trim() && !checkImage)} tone="rust">
+          {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
+        </Btn>
         {result && <div style={{ background: "#fff", border: `1px solid ${C.line}`, whiteSpace: "pre-wrap" }} className="mt-4 rounded-md p-3 text-sm">{result}</div>}
       </div>
 
@@ -1157,18 +1493,33 @@ function ProductsTab({ products, setProducts }) {
         storageKey="products"
         addLabel="Add product"
         renderCard={(p) => (
-          <div>
-            <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
-            <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
-            <div className="flex items-center gap-3">
-              {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
-              {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
+          <div className="flex items-start gap-3">
+            {p.image && (
+              <button type="button" onClick={() => setPreview(p.image)} className="shrink-0">
+                <img
+                  src={`data:${p.image.mimeType};base64,${p.image.data}`}
+                  alt={p.item}
+                  style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.line}` }}
+                />
+              </button>
+            )}
+            <div className="min-w-0">
+              <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
+              <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
+              {p.productId && (
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs mb-1">ID: {p.productId}</div>
+              )}
+              <div className="flex items-center gap-3">
+                {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
+                {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
+              </div>
+              {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
+              {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
             </div>
-            {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
-            {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
           </div>
         )}
       />
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -1176,38 +1527,140 @@ function ProductsTab({ products, setProducts }) {
 /* ---------------------------------------------------------------------- */
 /*  Documents tab (bills & agreements)                                     */
 /* ---------------------------------------------------------------------- */
+const DOCUMENT_TYPES = ["Bill", "Agreement", "Receipt", "Design", "Other"];
+
 const documentSchema = [
   { key: "title", label: "Title", type: "text", required: true },
-  { key: "type", label: "Type", type: "select", options: ["Bill", "Agreement", "Receipt", "Other"], required: true },
+  { key: "type", label: "Type", type: "select", options: DOCUMENT_TYPES, required: true },
   { key: "date", label: "Date", type: "date" },
   { key: "amount", label: "Amount (₹)", type: "number" },
-  { key: "vendor", label: "Vendor / party", type: "text" },
+  { key: "attachment", label: "Attach file (photo, PDF, scan)", type: "file", accept: ".pdf,.doc,.docx,image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
-function DocumentsTab({ documents, setDocuments }) {
+function DocumentsTab({ documents, setDocuments, currentUser }) {
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const isOwner = currentUser?.role === "owner";
+
+  const [typeFilter, setTypeFilter] = useState("All");
+
+  // Bills, receipts, and "other" are private to whoever uploaded them
+  // (plus the owner, who sees everything). Agreements are shared between
+  // the builder and the owner only. Designs (drawings, plans, elevations)
+  // are shared with everyone on the project, since the whole site team
+  // needs to build from them.
+  const canSee = (d) => {
+    if (isOwner) return true;
+    if (d.type === "Design") return true;
+    if (d.type === "Agreement") return currentUser?.role === "builder";
+    return !!d.uploadedBy && d.uploadedBy === currentUser?.id;
+  };
+  const visible = documents.filter(canSee);
+  const countFor = (t) => (t === "All" ? visible.length : visible.filter((d) => d.type === t).length);
+  const shown = typeFilter === "All" ? visible : visible.filter((d) => d.type === typeFilter);
+
+  // Deliberately operate on the FULL `documents` array here, not
+  // `visible` — persisting a filtered subset would silently drop every
+  // document this viewer can't see.
+  const add = async (vals) => {
+    const doc = { id: uid(), uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", ...vals };
+    const next = [doc, ...documents];
+    setDocuments(next);
+    setOpen(false);
+    const ok = await saveKey("documents", next);
+    console.log(ok ? `[SiteLedger] Document uploaded: "${doc.title}" (${doc.type})` : `[SiteLedger] Document upload FAILED: "${doc.title}"`);
+  };
+  const remove = async (id) => {
+    const next = documents.filter((d) => d.id !== id);
+    setDocuments(next);
+    await saveKey("documents", next);
+  };
+
   return (
-    <ListSection
-      icon={FileText}
-      title="Bills &amp; agreements"
-      subtitle="Keep a record for future reference and disputes"
-      schema={documentSchema}
-      items={documents}
-      setItems={setDocuments}
-      storageKey="documents"
-      addLabel="Add document"
-      renderCard={(d) => (
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
-            <Stamp tone="navy">{d.type}</Stamp>
-          </div>
-          <div style={{ color: C.concrete }} className="text-xs mb-1">{d.date} {d.vendor && `· ${d.vendor}`}</div>
-          {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
-          <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
+    <div>
+      <SectionHeader
+        icon={FileText}
+        title="Bills &amp; agreements"
+        subtitle={
+          isOwner
+            ? "Keep a record for future reference and disputes"
+            : "Your bills/receipts are private to you and the owner; agreements are shared with the builder and owner; designs are shared with the whole team"
+        }
+        action={
+          <Btn onClick={() => setOpen(true)}>
+            <Plus size={16} /> Add document
+          </Btn>
+        }
+      />
+      {visible.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-4">
+          {["All", ...DOCUMENT_TYPES].map((t) => {
+            const active = typeFilter === t;
+            const n = countFor(t);
+            return (
+              <button
+                key={t}
+                onClick={() => setTypeFilter(t)}
+                style={{
+                  background: active ? C.navy : C.card,
+                  color: active ? "#fff" : C.ink,
+                  border: `1px solid ${active ? C.navy : C.line}`,
+                  opacity: n === 0 && !active ? 0.55 : 1,
+                  transition: "background 150ms, color 150ms",
+                }}
+                className="rounded-full px-3 py-1 text-xs font-semibold"
+              >
+                {t} <span style={{ fontFamily: "'IBM Plex Mono', monospace", opacity: 0.75 }}>{n}</span>
+              </button>
+            );
+          })}
         </div>
       )}
-    />
+      {visible.length === 0 && (
+        <p style={{ color: C.concrete }} className="text-sm italic">Nothing here yet.</p>
+      )}
+      {visible.length > 0 && shown.length === 0 && (
+        <p style={{ color: C.concrete }} className="text-sm italic">No {typeFilter.toLowerCase()} documents yet.</p>
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {shown.map((d) => (
+          <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }} className="rounded-lg p-4 relative hover:shadow-md hover:-translate-y-0.5">
+            <button
+              onClick={() => remove(d.id)}
+              style={{ color: C.concrete }}
+              className="absolute top-3 right-3 hover:text-red-600"
+            >
+              <Trash2 size={15} />
+            </button>
+            <div className="flex items-center justify-between mb-1">
+              <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
+              <Stamp tone="navy">{d.type}</Stamp>
+            </div>
+            <div style={{ color: C.concrete }} className="text-xs mb-1">
+              {d.date}{isOwner && d.uploadedByName ? ` · ${d.uploadedByName}` : ""}
+            </div>
+            {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
+            <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
+            {d.attachment && (
+              <button
+                onClick={() => setPreview(d.attachment)}
+                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                className="text-xs underline mt-2 inline-flex items-center gap-1"
+              >
+                <Paperclip size={12} /> {d.attachment.name}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {open && (
+        <Modal title="Add document" onClose={() => setOpen(false)}>
+          <SchemaForm schema={documentSchema} onSubmit={add} />
+        </Modal>
+      )}
+      <FilePreview file={preview} onClose={() => setPreview(null)} />
+    </div>
   );
 }
 
@@ -1324,8 +1777,10 @@ function AuditLogTab() {
 
   const actionLabel = {
     login: "Signed in",
+    login_failed: "Sign-in failed",
     logout: "Signed out",
     data_saved: "Updated data",
+    save_failed: "Save failed",
     project_created: "Created the project",
     project_joined: "Joined the project",
     role_changed: "Changed a role",
@@ -1503,7 +1958,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
         {tab === "permissions" && canSee("permissions") && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
         {tab === "people" && canSee("people") && <PeopleTab contacts={contacts} setContacts={setContacts} />}
         {tab === "products" && canSee("products") && <ProductsTab products={products} setProducts={setProducts} />}
-        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
+        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} currentUser={currentUser} />}
         {tab === "issues" && <IssuesTab issues={issues} setIssues={setIssues} />}
         {tab === "team" && currentUser?.role === "owner" && <TeamTab currentUserEmail={currentUser.email} />}
         {tab === "audit" && currentUser?.role === "owner" && <AuditLogTab />}

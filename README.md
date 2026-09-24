@@ -31,18 +31,32 @@ usable as-is.
 
 ## Phase 2 — turn on the AI features
 
+`api/ai.js` supports two providers — set one as an environment variable
+and it just works, no other code changes needed:
+
+- **`GEMINI_API_KEY`** (recommended for testing) — Google's Gemini API has
+  a free tier with no credit card required. Grab a key at
+  [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and use
+  that. If this is set, it's used regardless of whether the key below is
+  also set.
+- **`ANTHROPIC_API_KEY`** — Claude via the Anthropic API. This is a
+  separate, pay-as-you-go product from a Claude.ai/Pro subscription — a
+  Pro plan does **not** include API credits. Add a real key from
+  [console.anthropic.com](https://console.anthropic.com), then add
+  billing credits under Settings → Billing before it'll actually respond.
+
 The simplest path is deploying to **Vercel** (free tier is enough):
 
 1. Push this folder to a GitHub repo.
 2. Import it in Vercel.
-3. In Vercel's project settings, add an environment variable
-   `ANTHROPIC_API_KEY` with a real key from console.anthropic.com.
+3. In Vercel's project settings → Environment Variables, add
+   `GEMINI_API_KEY` (free) or `ANTHROPIC_API_KEY` (paid) — see above.
 4. Deploy. `/api/ai` now works automatically — Vercel treats anything in
    `/api` as a serverless function with no extra config.
 
 To test the AI proxy locally before deploying: `npx vercel dev` (needs a
 free Vercel CLI login) runs both the frontend and the `/api` functions
-together on your machine.
+together on your machine — `.env` needs the same key(s) added locally too.
 
 If you'd rather not use Vercel, `api/ai.js` is a plain proxy — port the
 same logic into any Node/Express server or another provider's serverless

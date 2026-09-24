@@ -21,7 +21,10 @@ export async function loadKey(key, fallback) {
 
 export async function saveKey(key, value) {
   const projectId = getActiveProjectId();
-  if (!projectId) return;
+  if (!projectId) {
+    console.warn(`[SiteLedger] Save skipped — no active project (key: "${key}")`);
+    return;
+  }
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -33,8 +36,11 @@ export async function saveKey(key, value) {
     updated_at: new Date().toISOString(),
   });
   if (error) {
-    console.error("storage save failed", key, error);
-    return;
+    console.error(`[SiteLedger] Save FAILED — "${key}":`, error.message);
+    await logAudit("save_failed", { key, error: error.message });
+    return false;
   }
+  console.log(`[SiteLedger] Saved "${key}" successfully`);
   logAudit("data_saved", { key });
+  return true;
 }
