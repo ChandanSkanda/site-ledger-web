@@ -1,17 +1,8 @@
 // Vercel serverless function: POST /api/ai
 // Body: { text: string, images?: string[] (base64 jpegs), useSearch?: boolean }
 //
-// Supports two providers, tried in this order:
-//   1. GEMINI_API_KEY  — Google's Gemini API. Free to use for testing (no
-//      credit card needed for the free tier): grab a key at
-//      https://aistudio.google.com/apikey and add it as GEMINI_API_KEY.
-//   2. ANTHROPIC_API_KEY — Claude via the Anthropic API. This is a paid,
-//      pay-as-you-go product, separate from a Claude.ai subscription —
-//      see console.anthropic.com/settings/billing to add credits.
-//
-// Set whichever one you have a key for; if both are set, Gemini is used
-// (since it's the free option for testing). Deploy this repo to Vercel and
-// add the env var in the project settings — no other setup needed.
+// Uses Google's Gemini API only. Set GEMINI_API_KEY in Vercel's
+// environment variables (free key from https://aistudio.google.com/apikey).
 //
 // If you deploy elsewhere (Netlify, a plain Node/Express server, etc.),
 // port this same logic — it's a thin proxy, nothing Vercel-specific except
@@ -31,7 +22,6 @@ export default async function handler(req, res) {
   }
 
   const geminiKey = process.env.GEMINI_API_KEY;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
   // Accept either plain base64 strings (assumed JPEG — the old shape) or
   // { data, mimeType } objects, so a PDF plan upload can be sent as
@@ -41,26 +31,10 @@ export default async function handler(req, res) {
   );
 
   try {
-    let out;
-    if (geminiKey) {
-      try {
-        out = await withRetry(() => callGemini({ text, files, useSearch, apiKey: geminiKey }));
-      } catch (e) {
-        // Gemini still busy after retrying — use Claude instead if a key is set.
-        if (anthropicKey && isBusyError(e)) {
-          console.warn("Gemini busy, falling back to Anthropic");
-          out = await withRetry(() => callAnthropic({ text, files, useSearch, apiKey: anthropicKey }));
-        } else {
-          throw e;
-        }
-      }
-    } else if (anthropicKey) {
-      out = await callAnthropic({ text, files, useSearch, apiKey: anthropicKey });
-    } else {
-      return res.status(500).json({
-        error: "No AI provider configured — set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in your environment variables.",
-      });
+    if (!geminiKey) {
+      return res.status(500).json({ error: "No AI provider configured — set GEMINI_API_KEY in your Vercel environment variables." });
     }
+    const out = await callGeminiWithFallback({ text, files, useSearch, apiKey: geminiKey });
     return res.status(200).json({ text: out });
   } catch (e) {
     console.error("AI request failed", e);
@@ -87,7 +61,26 @@ async function withRetry(fn, waits = [3000, 8000]) {
   }
 }
 
-async function callGemini({ text, files, useSearch, apiKey }) {
+// Gemini only (no paid Anthropic calls). If the main model is busy even
+// after retries, try the next model in the list; a model name Google has
+// retired (404) is skipped the same way.
+const GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"];
+
+async function callGeminiWithFallback(args) {
+  let lastErr;
+  for (const model of GEMINI_MODELS) {
+    try {
+      return await withRetry(() => callGemini({ ...args, model }), model === GEMINI_MODELS[0] ? [3000, 8000] : [4000]);
+    } catch (e) {
+      lastErr = e;
+      if (!(isBusyError(e) || e?.status === 404)) throw e;
+      console.warn(`Gemini model ${model} unavailable (${e.status}), trying next`);
+    }
+  }
+  throw lastErr;
+}
+
+async function callGemini({ text, files, useSearch, apiKey, model = GEMINI_MODELS[0] }) {
   const parts = [{ text }];
   files.forEach(({ data, mimeType }) => parts.push({ inlineData: { mimeType: mimeType || "image/jpeg", data } }));
 
@@ -96,7 +89,6 @@ async function callGemini({ text, files, useSearch, apiKey }) {
     body.tools = [{ googleSearch: {} }];
   }
 
-  const model = "gemini-3.6-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const geminiRes = await fetch(url, {
     method: "POST",
@@ -112,48 +104,5 @@ async function callGemini({ text, files, useSearch, apiKey }) {
   return (data.candidates?.[0]?.content?.parts || [])
     .map((p) => p.text)
     .filter(Boolean)
-    .join("\n\n");
-}
-
-async function callAnthropic({ text, files, useSearch, apiKey }) {
-  const content = [];
-  files.forEach(({ data, mimeType }) => {
-    const mt = mimeType || "image/jpeg";
-    // Claude takes PDFs as a "document" block, everything else as "image".
-    content.push(
-      mt === "application/pdf"
-        ? { type: "document", source: { type: "base64", media_type: mt, data } }
-        : { type: "image", source: { type: "base64", media_type: mt, data } }
-    );
-  });
-  content.push({ type: "text", text });
-
-  const body = {
-    model: "claude-sonnet-5",
-    max_tokens: 2500,
-    messages: [{ role: "user", content }],
-  };
-  if (useSearch) {
-    body.tools = [{ type: "web_search_20250305", name: "web_search" }];
-  }
-
-  const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await anthropicRes.json();
-  if (!anthropicRes.ok) {
-    const err = new Error(data?.error?.message || `Anthropic error (${anthropicRes.status})`);
-    err.status = anthropicRes.status;
-    throw err;
-  }
-  return (data.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
     .join("\n\n");
 }
