@@ -139,7 +139,8 @@ function fileToBase64(file) {
 const fmtINR = (n) =>
   "₹" + (Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-const today = () => new Date().toISOString().slice(0, 10);
+// Local date (not UTC), so evening entries don't jump to tomorrow.
+const today = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
 /* ---------------------------------------------------------------------- */
 /*  Small UI primitives                                                    */
@@ -468,7 +469,7 @@ function rowsToItems(schema, rows) {
 /* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem }) {
   const [open, setOpen] = useState(false);
   const [importMsg, setImportMsg] = useState("");
   const importRef = useRef();
@@ -481,10 +482,20 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
     setOpen(false);
     await persist(next);
   };
+  // Used by custom forms (renderForm): they build the full item themselves.
+  const addItem = async (item) => {
+    const next = [item, ...items];
+    setItems(next);
+    setOpen(false);
+    await persist(next);
+    return next;
+  };
   const remove = async (id) => {
+    const removed = items.find((i) => i.id === id);
     const next = items.filter((i) => i.id !== id);
     setItems(next);
     await persist(next);
+    if (removed && onRemoveItem) onRemoveItem(removed);
   };
 
   const exportCSV = () => {
@@ -563,8 +574,8 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
           >
             <button
               onClick={() => remove(item.id)}
-              style={{ color: C.concrete }}
-              className="absolute top-3 right-3 hover:text-red-600"
+              style={{ color: C.concrete, background: "rgba(245,242,233,0.9)" }}
+              className="absolute top-2.5 right-2.5 z-10 rounded-full p-1 hover:text-red-600"
             >
               <Trash2 size={15} />
             </button>
@@ -574,7 +585,7 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
       </div>
       {open && (
         <Modal title={addLabel} onClose={() => setOpen(false)}>
-          <SchemaForm schema={schema} onSubmit={add} />
+          {renderForm ? renderForm({ addItem, close: () => setOpen(false) }) : <SchemaForm schema={schema} onSubmit={add} />}
         </Modal>
       )}
     </div>
@@ -772,8 +783,233 @@ const progressSchema = [
   { key: "stage", label: "Stage", type: "select", options: STAGES, required: true },
   { key: "workersCount", label: "Workers on site", type: "number" },
   { key: "description", label: "What happened today", type: "textarea" },
-  { key: "flag", label: "Flag", type: "select", options: ["None", "Watch", "Red Flag"] },
+  { key: "flag", label: "Flag (set by AI)", type: "text" },
+  { key: "flagReason", label: "AI flag reason", type: "text" },
 ];
+
+// Photos are stored under their own key per entry (not inside the progress
+// list) so the daily log stays small and fast to load as photos pile up.
+const progressPhotoKey = (id) => `progress-photos-${id}`;
+const PHOTO_SLOTS = [
+  { key: "start", label: "Start of day" },
+  { key: "end", label: "End of day" },
+];
+
+// Ask the AI to watch the entry and decide the flag. Returns { flag, reason }.
+async function reviewProgressEntry(entry, photos, { recent = [], planText = "", completedStages = [] } = {}) {
+  const imgs = PHOTO_SLOTS.filter((s) => photos?.[s.key]).map((s) => ({ data: photos[s.key], mimeType: "image/jpeg" }));
+  const history = recent
+    .slice(0, 10)
+    .map((p) => `${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || ""}`)
+    .join("\n");
+  const photoNote = imgs.length === 2
+    ? "Two site photos are attached: the first from the START of the day, the second from the END of the day. Compare them — did visible work actually happen?"
+    : imgs.length === 1
+    ? "One site photo is attached."
+    : "No photos were attached.";
+  const text = `You are watching a house construction site in Bangalore, India on behalf of the homeowner, who is not on site. Review today's log entry and decide if anything needs the homeowner's attention.
+
+Today's entry:
+Date: ${entry.date}
+Stage: ${entry.stage}
+Workers on site: ${entry.workersCount || "not given"}
+What happened: ${entry.description || "(nothing written)"}
+
+${photoNote}
+
+Stages already marked complete: ${completedStages.join(", ") || "none"}
+Approved plan / schedule: ${planText || "(not provided)"}
+Recent log (most recent first):
+${history || "(no earlier entries)"}
+
+Look for: safety problems (no helmets, unsafe scaffolding, exposed rebar, open trenches), poor workmanship or material issues visible in photos, work out of sequence (e.g. a stage started before an earlier one is done), very few workers or little visible progress between start and end photos, the description not matching the photos, or falling behind the plan.
+
+Reply in exactly this format and nothing else:
+FLAG: NONE or WATCH or RED FLAG
+REASON: one or two short sentences a homeowner can understand. If NONE, say briefly what looks fine.`;
+  const out = await askClaude({ text, images: imgs });
+  const m = out.match(/FLAG:\s*(RED\s*FLAG|WATCH|NONE)/i);
+  const r = out.match(/REASON:\s*([\s\S]+)/i);
+  const word = m ? m[1].toUpperCase().replace(/\s+/g, " ") : "WATCH";
+  const flag = word === "RED FLAG" ? "Red Flag" : word === "WATCH" ? "Watch" : "None";
+  return { flag, reason: (r ? r[1] : out).trim().slice(0, 400) };
+}
+
+function PhotoPicker({ label, value, onChange }) {
+  const ref = useRef();
+  return (
+    <div>
+      <input
+        type="file"
+        accept="image/*"
+        ref={ref}
+        className="hidden"
+        onChange={async (e) => {
+          const file = e.target.files[0];
+          e.target.value = "";
+          if (!file) return;
+          onChange(await compressImage(file, 1200, 0.72));
+        }}
+      />
+      {value ? (
+        <div className="relative">
+          <img src={`data:image/jpeg;base64,${value}`} alt={label} className="w-full rounded-md object-cover" style={{ height: 120 }} />
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
+            className="absolute top-1.5 right-1.5 rounded-full p-1"
+          >
+            <X size={12} />
+          </button>
+          <div style={{ background: "rgba(0,0,0,0.55)", color: "#fff" }} className="absolute bottom-1.5 left-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded">{label}</div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => ref.current.click()}
+          style={{ border: `1.5px dashed ${C.line}`, color: C.concrete, background: "#fff", height: 120 }}
+          className="w-full rounded-md flex flex-col items-center justify-center gap-1 text-xs font-semibold hover:opacity-80"
+        >
+          <Camera size={18} />
+          {label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ProgressEntryForm({ onSave }) {
+  const [vals, setVals] = useState({ date: today(), stage: "", workersCount: "", description: "" });
+  const [photos, setPhotos] = useState({ start: null, end: null });
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => setVals((p) => ({ ...p, [k]: v }));
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaving(true);
+        await onSave(vals, photos);
+        setSaving(false);
+      }}
+    >
+      <Field label="Date">
+        <input style={inputStyle} type="date" value={vals.date} required onChange={(e) => set("date", e.target.value)} />
+      </Field>
+      <Field label="Stage">
+        <select style={inputStyle} value={vals.stage} required onChange={(e) => set("stage", e.target.value)}>
+          <option value="">Select…</option>
+          {STAGES.map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      </Field>
+      <Field label="Workers on site">
+        <input style={inputStyle} type="number" min="0" value={vals.workersCount} onChange={(e) => set("workersCount", e.target.value)} />
+      </Field>
+      <Field label="What happened today">
+        <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals.description} onChange={(e) => set("description", e.target.value)} />
+      </Field>
+      <Field label="Site photos (optional)">
+        <div className="grid grid-cols-2 gap-2">
+          {PHOTO_SLOTS.map((slot) => (
+            <PhotoPicker key={slot.key} label={slot.label} value={photos[slot.key]} onChange={(v) => setPhotos((p) => ({ ...p, [slot.key]: v }))} />
+          ))}
+        </div>
+      </Field>
+      <p style={{ color: C.concrete }} className="text-xs mb-3 flex items-center gap-1.5">
+        <Sparkles size={12} /> After you save, AI reviews the entry and photos and flags anything worth your attention.
+      </p>
+      <Btn type="submit" disabled={saving}>
+        {saving && <Loader2 size={15} className="animate-spin" />} Save
+      </Btn>
+    </form>
+  );
+}
+
+const FLAG_STYLE = {
+  "Red Flag": { tone: "red", label: "Red flag", color: C.red },
+  Watch: { tone: "yellow", label: "Watch", color: C.yellow },
+  None: { tone: "green", label: "Looks OK", color: C.green },
+};
+
+function ProgressCard({ entry, onRecheck }) {
+  const [photos, setPhotos] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const hasPhotos = entry.photoSlots && entry.photoSlots.length > 0;
+
+  useEffect(() => {
+    let alive = true;
+    if (hasPhotos) loadKey(progressPhotoKey(entry.id), null).then((p) => alive && setPhotos(p));
+    return () => { alive = false; };
+  }, [entry.id, hasPhotos]);
+
+  const slots = PHOTO_SLOTS.filter((s) => entry.photoSlots?.includes(s.key));
+  const fs = FLAG_STYLE[entry.flag];
+
+  return (
+    <div>
+      {hasPhotos && (
+        <div className="relative -mx-4 -mt-4 mb-3 rounded-t-lg overflow-hidden" style={{ background: C.paperDark }}>
+          <div className={`grid ${slots.length === 2 ? "grid-cols-2 gap-0.5" : "grid-cols-1"}`}>
+            {slots.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => photos?.[s.key] && setPreview({ name: `${entry.date} — ${entry.stage} — ${s.label}`, mimeType: "image/jpeg", data: photos[s.key] })}
+                className="relative block"
+                style={{ height: 190 }}
+              >
+                {photos?.[s.key] ? (
+                  <img src={`data:image/jpeg;base64,${photos[s.key]}`} alt={s.label} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center"><Loader2 size={18} className="animate-spin" style={{ color: C.concrete }} /></div>
+                )}
+                <span style={{ background: "rgba(0,0,0,0.55)", color: "#fff" }} className="absolute bottom-2 left-2 text-[10px] font-semibold px-1.5 py-0.5 rounded">{s.label}</span>
+              </button>
+            ))}
+          </div>
+          {/* Stage + what happened, laid over the top of the photos */}
+          <div
+            style={{ background: "linear-gradient(180deg, rgba(10,20,32,0.85) 0%, rgba(10,20,32,0.55) 65%, transparent 100%)", pointerEvents: "none" }}
+            className="absolute top-0 left-0 right-0 px-3 pt-2.5 pb-6 text-white"
+          >
+            <div style={{ fontFamily: "'Oswald', sans-serif" }} className="font-semibold uppercase text-sm tracking-wide pr-6">{entry.stage}</div>
+            {entry.description && (
+              <p className="text-xs leading-snug" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                {entry.description}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap mb-1 pr-6">
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{entry.date}</span>
+        {entry.flag === "Checking" && (
+          <span style={{ color: C.concrete }} className="text-xs inline-flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> AI is reviewing…</span>
+        )}
+        {fs && (entry.flag !== "None" || entry.flagReason) && <Stamp tone={fs.tone}>{fs.label}</Stamp>}
+      </div>
+      {!hasPhotos && (
+        <>
+          <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm mb-1">{entry.stage}</div>
+          <p style={{ color: C.ink }} className="text-sm">{entry.description}</p>
+        </>
+      )}
+      {entry.workersCount && <div style={{ color: C.concrete }} className="text-xs mt-1">{entry.workersCount} workers on site</div>}
+      {entry.flagReason && (
+        <div style={{ borderLeft: `3px solid ${fs?.color || C.concrete}`, background: "#fff", color: C.ink }} className="mt-2 text-xs px-2.5 py-1.5 rounded-r">
+          <span className="font-semibold inline-flex items-center gap-1"><Sparkles size={11} /> AI:</span> {entry.flagReason}
+        </div>
+      )}
+      {entry.flag !== "Checking" && (
+        <button onClick={() => onRecheck(entry, photos)} style={{ color: C.navy }} className="text-xs underline mt-2">
+          {entry.flagReason ? "Re-check with AI" : "Check with AI"}
+        </button>
+      )}
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
+    </div>
+  );
+}
 
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
@@ -784,6 +1020,44 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const planFileRef = useRef();
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
+
+  // Always points at the latest list, so an AI review that finishes later
+  // doesn't overwrite entries added or removed in the meantime.
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
+
+  const patchEntry = async (id, patch) => {
+    const next = progressRef.current.map((p) => (p.id === id ? { ...p, ...patch } : p));
+    progressRef.current = next;
+    setProgress(next);
+    await saveKey("progress", next);
+  };
+
+  const runReview = async (entry, photos) => {
+    await patchEntry(entry.id, { flag: "Checking" });
+    try {
+      const pics = photos || (entry.photoSlots?.length ? await loadKey(progressPhotoKey(entry.id), null) : null);
+      const { flag, reason } = await reviewProgressEntry(entry, pics, {
+        recent: progressRef.current.filter((p) => p.id !== entry.id),
+        planText: meta.planText,
+        completedStages: meta.completedStages || [],
+      });
+      await patchEntry(entry.id, { flag, flagReason: reason });
+    } catch (e) {
+      console.error("[SiteLedger] AI review failed", e);
+      await patchEntry(entry.id, { flag: entry.flag === "Checking" ? "" : entry.flag || "", flagReason: entry.flagReason || "" });
+    }
+  };
+
+  const saveEntry = (addItem) => async (vals, photos) => {
+    const id = uid();
+    const photoSlots = PHOTO_SLOTS.filter((s) => photos[s.key]).map((s) => s.key);
+    if (photoSlots.length) await saveKey(progressPhotoKey(id), photos);
+    const entry = { id, ...vals, photoSlots, flag: "Checking", flagReason: "" };
+    const next = await addItem(entry);
+    progressRef.current = next;
+    runReview(entry, photos);
+  };
 
   const savePlan = async () => {
     const next = { ...meta, planText: planDraft };
@@ -935,17 +1209,9 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         addLabel="Log today's progress"
         enableImportExport
         exportFileName="daily-progress-log"
-        renderCard={(p) => (
-          <div>
-            <div className="flex items-center gap-2 flex-wrap mb-1">
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{p.date}</span>
-              {p.flag && p.flag !== "None" && <Stamp tone={p.flag === "Red Flag" ? "red" : "yellow"}>{p.flag}</Stamp>}
-            </div>
-            <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm mb-1">{p.stage}</div>
-            {p.workersCount && <div style={{ color: C.concrete }} className="text-xs mb-1">{p.workersCount} workers on site</div>}
-            <p style={{ color: C.ink }} className="text-sm">{p.description}</p>
-          </div>
-        )}
+        renderForm={({ addItem }) => <ProgressEntryForm onSave={saveEntry(addItem)} />}
+        onRemoveItem={(item) => item.photoSlots?.length && saveKey(progressPhotoKey(item.id), null)}
+        renderCard={(p) => <ProgressCard entry={p} onRecheck={runReview} />}
       />
     </div>
   );
