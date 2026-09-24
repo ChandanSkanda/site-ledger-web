@@ -3,7 +3,7 @@ import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
-  Upload, Download, Paperclip,
+  Upload, Download, Paperclip, Pencil,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -466,11 +466,35 @@ function rowsToItems(schema, rows) {
   return { items, skipped };
 }
 
+// Edit + delete buttons in the top-right corner of a card. Delete asks
+// first, so a mis-tap on a phone doesn't wipe an entry.
+function CardActions({ onEdit, onDelete }) {
+  const btn = { color: C.concrete, background: "rgba(245,242,233,0.92)" };
+  return (
+    <div className="absolute top-2.5 right-2.5 z-10 flex gap-1">
+      {onEdit && (
+        <button onClick={onEdit} title="Edit" style={btn} className="rounded-full p-1 hover:text-blue-800">
+          <Pencil size={14} />
+        </button>
+      )}
+      <button
+        onClick={() => { if (window.confirm("Delete this entry? This can't be undone.")) onDelete(); }}
+        title="Delete"
+        style={btn}
+        className="rounded-full p-1 hover:text-red-600"
+      >
+        <Trash2 size={14} />
+      </button>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
 function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null); // item being edited
   const [importMsg, setImportMsg] = useState("");
   const importRef = useRef();
 
@@ -487,6 +511,14 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
     const next = [item, ...items];
     setItems(next);
     setOpen(false);
+    await persist(next);
+    return next;
+  };
+  // Replace one item in place (keeps its id and any fields the form doesn't show).
+  const updateItem = async (id, patch) => {
+    const next = items.map((i) => (i.id === id ? { ...i, ...patch, id } : i));
+    setItems(next);
+    setEditing(null);
     await persist(next);
     return next;
   };
@@ -572,13 +604,7 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
             style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }}
             className="rounded-lg p-4 relative hover:shadow-md hover:-translate-y-0.5"
           >
-            <button
-              onClick={() => remove(item.id)}
-              style={{ color: C.concrete, background: "rgba(245,242,233,0.9)" }}
-              className="absolute top-2.5 right-2.5 z-10 rounded-full p-1 hover:text-red-600"
-            >
-              <Trash2 size={15} />
-            </button>
+            <CardActions onEdit={() => setEditing(item)} onDelete={() => remove(item.id)} />
             {renderCard(item)}
           </div>
         ))}
@@ -586,6 +612,13 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
       {open && (
         <Modal title={addLabel} onClose={() => setOpen(false)}>
           {renderForm ? renderForm({ addItem, close: () => setOpen(false) }) : <SchemaForm schema={schema} onSubmit={add} />}
+        </Modal>
+      )}
+      {editing && (
+        <Modal title="Edit entry" onClose={() => setEditing(null)}>
+          {renderForm
+            ? renderForm({ initial: editing, updateItem, close: () => setEditing(null) })
+            : <SchemaForm schema={schema} initial={editing} submitLabel="Save changes" onSubmit={(vals) => updateItem(editing.id, vals)} />}
         </Modal>
       )}
     </div>
@@ -879,9 +912,22 @@ function PhotoPicker({ label, value, onChange }) {
   );
 }
 
-function ProgressEntryForm({ onSave }) {
-  const [vals, setVals] = useState({ date: today(), stage: "", workersCount: "", description: "" });
+function ProgressEntryForm({ onSave, initial }) {
+  const [vals, setVals] = useState({
+    date: initial?.date || today(),
+    stage: initial?.stage || "",
+    workersCount: initial?.workersCount || "",
+    description: initial?.description || "",
+  });
   const [photos, setPhotos] = useState({ start: null, end: null });
+  const [loadingPhotos, setLoadingPhotos] = useState(!!initial?.photoSlots?.length);
+  useEffect(() => {
+    if (!initial?.photoSlots?.length) return;
+    loadKey(progressPhotoKey(initial.id), null).then((p) => {
+      setPhotos({ start: p?.start || null, end: p?.end || null });
+      setLoadingPhotos(false);
+    });
+  }, [initial?.id]);
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setVals((p) => ({ ...p, [k]: v }));
   return (
@@ -909,17 +955,21 @@ function ProgressEntryForm({ onSave }) {
         <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals.description} onChange={(e) => set("description", e.target.value)} />
       </Field>
       <Field label="Site photos (optional)">
+        {loadingPhotos ? (
+          <p style={{ color: C.concrete }} className="text-xs flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading photos…</p>
+        ) : (
         <div className="grid grid-cols-2 gap-2">
           {PHOTO_SLOTS.map((slot) => (
             <PhotoPicker key={slot.key} label={slot.label} value={photos[slot.key]} onChange={(v) => setPhotos((p) => ({ ...p, [slot.key]: v }))} />
           ))}
         </div>
+        )}
       </Field>
       <p style={{ color: C.concrete }} className="text-xs mb-3 flex items-center gap-1.5">
-        <Sparkles size={12} /> After you save, AI reviews the entry and photos and flags anything worth your attention.
+        <Sparkles size={12} /> After you save, AI {initial ? "re-reviews" : "reviews"} the entry and photos and flags anything worth your attention.
       </p>
-      <Btn type="submit" disabled={saving}>
-        {saving && <Loader2 size={15} className="animate-spin" />} Save
+      <Btn type="submit" disabled={saving || loadingPhotos}>
+        {saving && <Loader2 size={15} className="animate-spin" />} {initial ? "Save changes" : "Save"}
       </Btn>
     </form>
   );
@@ -972,9 +1022,9 @@ function ProgressCard({ entry, onRecheck }) {
             style={{ background: "linear-gradient(180deg, rgba(10,20,32,0.85) 0%, rgba(10,20,32,0.55) 65%, transparent 100%)", pointerEvents: "none" }}
             className="absolute top-0 left-0 right-0 px-3 pt-2.5 pb-6 text-white"
           >
-            <div style={{ fontFamily: "'Oswald', sans-serif" }} className="font-semibold uppercase text-sm tracking-wide pr-6">{entry.stage}</div>
+            <div style={{ fontFamily: "'Oswald', sans-serif" }} className="font-semibold uppercase text-sm tracking-wide pr-16">{entry.stage}</div>
             {entry.description && (
-              <p className="text-xs leading-snug" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+              <p className="text-xs leading-snug pr-16" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                 {entry.description}
               </p>
             )}
@@ -982,7 +1032,7 @@ function ProgressCard({ entry, onRecheck }) {
         </div>
       )}
 
-      <div className="flex items-center gap-2 flex-wrap mb-1 pr-6">
+      <div className="flex items-center gap-2 flex-wrap mb-1 pr-16">
         <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{entry.date}</span>
         {entry.flag === "Checking" && (
           <span style={{ color: C.concrete }} className="text-xs inline-flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> AI is reviewing…</span>
@@ -1055,6 +1105,16 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
     if (photoSlots.length) await saveKey(progressPhotoKey(id), photos);
     const entry = { id, ...vals, photoSlots, flag: "Checking", flagReason: "" };
     const next = await addItem(entry);
+    progressRef.current = next;
+    runReview(entry, photos);
+  };
+
+  const saveEdit = (initial, updateItem) => async (vals, photos) => {
+    const photoSlots = PHOTO_SLOTS.filter((s) => photos[s.key]).map((s) => s.key);
+    if (photoSlots.length) await saveKey(progressPhotoKey(initial.id), photos);
+    else if (initial.photoSlots?.length) await saveKey(progressPhotoKey(initial.id), null);
+    const entry = { ...initial, ...vals, photoSlots };
+    const next = await updateItem(initial.id, { ...vals, photoSlots });
     progressRef.current = next;
     runReview(entry, photos);
   };
@@ -1209,7 +1269,10 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         addLabel="Log today's progress"
         enableImportExport
         exportFileName="daily-progress-log"
-        renderForm={({ addItem }) => <ProgressEntryForm onSave={saveEntry(addItem)} />}
+        renderForm={({ addItem, updateItem, initial }) =>
+          initial
+            ? <ProgressEntryForm key={initial.id} initial={initial} onSave={saveEdit(initial, updateItem)} />
+            : <ProgressEntryForm onSave={saveEntry(addItem)} />}
         onRemoveItem={(item) => item.photoSlots?.length && saveKey(progressPhotoKey(item.id), null)}
         renderCard={(p) => <ProgressCard entry={p} onRecheck={runReview} />}
       />
@@ -1806,6 +1869,7 @@ const documentSchema = [
 
 function DocumentsTab({ documents, setDocuments, currentUser }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [preview, setPreview] = useState(null);
   const isOwner = currentUser?.role === "owner";
 
@@ -1840,6 +1904,13 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
   const remove = async (id) => {
     const next = documents.filter((d) => d.id !== id);
     setDocuments(next);
+    await saveKey("documents", next);
+  };
+  // Keeps id and who uploaded it; only the form fields change.
+  const saveEdit = async (vals) => {
+    const next = documents.map((d) => (d.id === editing.id ? { ...d, ...vals, id: d.id, uploadedBy: d.uploadedBy, uploadedByName: d.uploadedByName } : d));
+    setDocuments(next);
+    setEditing(null);
     await saveKey("documents", next);
   };
 
@@ -1892,14 +1963,8 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
       <div className="grid gap-3 sm:grid-cols-2">
         {shown.map((d) => (
           <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }} className="rounded-lg p-4 relative hover:shadow-md hover:-translate-y-0.5">
-            <button
-              onClick={() => remove(d.id)}
-              style={{ color: C.concrete }}
-              className="absolute top-3 right-3 hover:text-red-600"
-            >
-              <Trash2 size={15} />
-            </button>
-            <div className="flex items-center justify-between mb-1">
+            <CardActions onEdit={() => setEditing(d)} onDelete={() => remove(d.id)} />
+            <div className="flex items-center justify-between mb-1 pr-16">
               <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
               <Stamp tone="navy">{d.type}</Stamp>
             </div>
@@ -1923,6 +1988,11 @@ function DocumentsTab({ documents, setDocuments, currentUser }) {
       {open && (
         <Modal title="Add document" onClose={() => setOpen(false)}>
           <SchemaForm schema={documentSchema} onSubmit={add} />
+        </Modal>
+      )}
+      {editing && (
+        <Modal title="Edit document" onClose={() => setEditing(null)}>
+          <SchemaForm schema={documentSchema} initial={editing} submitLabel="Save changes" onSubmit={saveEdit} />
         </Modal>
       )}
       <FilePreview file={preview} onClose={() => setPreview(null)} />
