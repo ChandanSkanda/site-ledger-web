@@ -1391,7 +1391,10 @@ Keep every point short and specific. Write "- Nothing noted" under a heading if 
       await saveKey("meta", next);
     } catch (e) {
       console.error("[SiteLedger] Plan cross-check failed", e);
-      setCheckError(`Could not complete the cross-check. ${e?.message || ""}`.trim());
+      const busy = /high demand|overloaded|try again later|rate limit|\(429\)|\(503\)/i.test(e?.message || "");
+      setCheckError(busy
+        ? "The AI service is busy right now (this is on Google's side and usually clears in a few minutes). Please try again shortly."
+        : `Could not complete the cross-check. ${e?.message || ""}`.trim());
     }
     setCheckStep("");
     setChecking(false);

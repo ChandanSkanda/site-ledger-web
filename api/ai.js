@@ -43,7 +43,17 @@ export default async function handler(req, res) {
   try {
     let out;
     if (geminiKey) {
-      out = await callGemini({ text, files, useSearch, apiKey: geminiKey });
+      try {
+        out = await withRetry(() => callGemini({ text, files, useSearch, apiKey: geminiKey }));
+      } catch (e) {
+        // Gemini still busy after retrying — use Claude instead if a key is set.
+        if (anthropicKey && isBusyError(e)) {
+          console.warn("Gemini busy, falling back to Anthropic");
+          out = await withRetry(() => callAnthropic({ text, files, useSearch, apiKey: anthropicKey }));
+        } else {
+          throw e;
+        }
+      }
     } else if (anthropicKey) {
       out = await callAnthropic({ text, files, useSearch, apiKey: anthropicKey });
     } else {
@@ -55,6 +65,25 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error("AI request failed", e);
     return res.status(502).json({ error: e.message || "AI request failed" });
+  }
+}
+
+// "High demand" / overloaded / rate-limit errors are temporary — worth retrying.
+function isBusyError(e) {
+  return e?.status === 429 || e?.status === 500 || e?.status === 503 || e?.status === 529 ||
+    /high demand|overloaded|unavailable|try again later|rate limit/i.test(e?.message || "");
+}
+
+// Try up to 3 times, waiting a little longer each time (about 3s, then 8s).
+async function withRetry(fn, waits = [3000, 8000]) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt >= waits.length || !isBusyError(e)) throw e;
+      console.warn(`AI busy (attempt ${attempt + 1}), retrying in ${waits[attempt]}ms`);
+      await new Promise((r) => setTimeout(r, waits[attempt]));
+    }
   }
 }
 
@@ -76,7 +105,9 @@ async function callGemini({ text, files, useSearch, apiKey }) {
   });
   const data = await geminiRes.json();
   if (!geminiRes.ok) {
-    throw new Error(data?.error?.message || `Gemini error (${geminiRes.status})`);
+    const err = new Error(data?.error?.message || `Gemini error (${geminiRes.status})`);
+    err.status = geminiRes.status;
+    throw err;
   }
   return (data.candidates?.[0]?.content?.parts || [])
     .map((p) => p.text)
@@ -117,7 +148,9 @@ async function callAnthropic({ text, files, useSearch, apiKey }) {
   });
   const data = await anthropicRes.json();
   if (!anthropicRes.ok) {
-    throw new Error(data?.error?.message || `Anthropic error (${anthropicRes.status})`);
+    const err = new Error(data?.error?.message || `Anthropic error (${anthropicRes.status})`);
+    err.status = anthropicRes.status;
+    throw err;
   }
   return (data.content || [])
     .filter((b) => b.type === "text")
