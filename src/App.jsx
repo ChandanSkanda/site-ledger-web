@@ -3,56 +3,18 @@ import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
-  Upload, Download, Paperclip,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
 import { ROLE_LABELS, ROLE_TAB_ACCESS, ALL_ROLES } from "./lib/roles";
 import { getActiveProjectId } from "./lib/activeProject";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
 /* ---------------------------------------------------------------------- */
 /*  Design tokens                                                          */
 /* ---------------------------------------------------------------------- */
 const FONTS = `
 @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-
-* { box-sizing: border-box; }
-
-::selection { background: #B7451F; color: #fff; }
-
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #CFC8B6; border-radius: 999px; border: 2px solid #E7E2D3; }
-::-webkit-scrollbar-thumb:hover { background: #B7451F; }
-
-input, select, textarea {
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-input:focus, select:focus, textarea:focus {
-  outline: none;
-  border-color: #16324F !important;
-  box-shadow: 0 0 0 3px rgba(22, 50, 79, 0.14);
-}
-
-button { transition: transform 0.12s ease, box-shadow 0.15s ease, background-color 0.15s ease, opacity 0.15s ease; }
-button:active:not(:disabled) { transform: scale(0.97); }
-
-@keyframes ledgerModalIn {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-@keyframes ledgerOverlayIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-.ledger-modal-overlay { animation: ledgerOverlayIn 0.15s ease; }
-.ledger-modal-panel { animation: ledgerModalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1); }
-
-@keyframes ledgerFadeUp {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.ledger-fade-up { animation: ledgerFadeUp 0.25s ease both; }
 `;
 const C = {
   navy: "#16324F",
@@ -75,6 +37,24 @@ const STAGES = [
   "Roof / Slab", "Brickwork", "Electrical Rough-in", "Plumbing Rough-in",
   "Plastering", "Flooring", "Painting", "Finishing", "Other",
 ];
+
+// Default builder payment schedule — pre-filled from the construction
+// agreement. Editable: amounts, milestone names, and rows can all be
+// changed from the Budget tab if the actual contract differs later.
+const DEFAULT_AGREEMENT = {
+  builderName: "Adigallu Pvt Ltd",
+  totalValue: 6700000,
+  milestones: [
+    { id: "m1", milestone: "Design Development & Construction Advance", percent: 25, agreedAmount: 1675000, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m2", milestone: "Plinth beam", percent: 12, agreedAmount: 804000, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m3", milestone: "Ground floor roof slab", percent: 15, agreedAmount: 1005000, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m4", milestone: "First floor roof slab", percent: 13.5, agreedAmount: 904500, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m5", milestone: "Second floor roof slab", percent: 13.5, agreedAmount: 904500, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m6", milestone: "Third floor roof slab", percent: 13.5, agreedAmount: 904500, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m7", milestone: "Staircase & Lift room roof slab", percent: 6, agreedAmount: 402000, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+    { id: "m8", milestone: "Final hand over", percent: 1.5, agreedAmount: 100500, status: "Pending", paidDate: "", paidAmount: "", notes: "" },
+  ],
+};
 
 /* ---------------------------------------------------------------------- */
 /*  Storage helpers                                                        */
@@ -108,15 +88,6 @@ function compressImage(file, maxWidth = 640, quality = 0.6) {
   });
 }
 
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => resolve(e.target.result.split(",")[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 const fmtINR = (n) =>
   "₹" + (Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -144,7 +115,6 @@ function Stamp({ children, tone = "concrete" }) {
         transform: "rotate(-2deg)",
         fontWeight: 600,
         whiteSpace: "nowrap",
-        boxShadow: "1px 2px 3px rgba(0,0,0,0.1)",
       }}
     >
       {children}
@@ -157,8 +127,8 @@ function SectionHeader({ icon: Icon, title, subtitle, action }) {
     <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
       <div className="flex items-center gap-3">
         <div
-          style={{ background: C.navy, color: C.paper, boxShadow: "0 2px 6px rgba(22,50,79,0.35)" }}
-          className="p-2.5 rounded-lg"
+          style={{ background: `linear-gradient(135deg, ${C.navy}, ${C.navyLight})`, color: C.paper, boxShadow: "0 2px 6px rgba(22,50,79,0.35)" }}
+          className="p-2.5 rounded-xl"
         >
           <Icon size={20} />
         </div>
@@ -194,11 +164,11 @@ function Btn({ children, onClick, tone = "navy", type = "button", disabled, smal
         border: tone === "ghost" ? `1.5px solid ${C.navy}` : "none",
         opacity: disabled ? 0.55 : 1,
         fontFamily: "'Inter', sans-serif",
-        boxShadow: tone === "ghost" || disabled ? "none" : "0 1px 2px rgba(22,50,79,0.18)",
+        boxShadow: tone === "ghost" ? "none" : "0 1px 2px rgba(32,36,42,0.15)",
       }}
       className={`inline-flex items-center gap-1.5 rounded-md font-semibold ${
         small ? "px-2.5 py-1.5 text-xs" : "px-4 py-2 text-sm"
-      } hover:opacity-85 hover:shadow-md disabled:hover:shadow-none transition disabled:cursor-not-allowed`}
+      } hover:opacity-90 hover:-translate-y-px transition disabled:cursor-not-allowed disabled:translate-y-0`}
     >
       {children}
     </button>
@@ -223,24 +193,24 @@ const inputStyle = {
   width: "100%",
   border: `1.5px solid ${C.line}`,
   background: "#fff",
-  borderRadius: "7px",
-  padding: "9px 11px",
+  borderRadius: "6px",
+  padding: "8px 10px",
   fontFamily: "'Inter', sans-serif",
   fontSize: "14px",
   color: C.ink,
 };
 
-function Modal({ title, onClose, children, size }) {
+function Modal({ title, onClose, children }) {
   return (
     <div
-      className="ledger-modal-overlay fixed inset-0 flex items-center justify-center p-4 z-50"
-      style={{ background: "rgba(22,50,79,0.6)", backdropFilter: "blur(1px)" }}
+      className="fixed inset-0 flex items-center justify-center p-4 z-50"
+      style={{ background: "rgba(22,50,79,0.55)" }}
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ background: C.card, maxHeight: "94vh" }}
-        className={`ledger-modal-panel w-full ${size === "large" ? "max-w-5xl" : "max-w-lg"} rounded-lg shadow-2xl overflow-y-auto`}
+        style={{ background: C.card, maxHeight: "88vh" }}
+        className="w-full max-w-lg rounded-lg shadow-2xl overflow-y-auto"
       >
         <div
           style={{ borderBottom: `1px solid ${C.line}`, background: C.card }}
@@ -259,32 +229,6 @@ function Modal({ title, onClose, children, size }) {
         <div className="p-5">{children}</div>
       </div>
     </div>
-  );
-}
-
-// Shows an uploaded image or PDF inline (in-page), rather than making the
-// browser download it — used anywhere a { name, mimeType, data } file is
-// attached (documents, the plan file, etc).
-function FilePreview({ file, onClose }) {
-  if (!file) return null;
-  const isImage = file.mimeType?.startsWith("image/");
-  const isPdf = file.mimeType === "application/pdf";
-  const dataUrl = `data:${file.mimeType};base64,${file.data}`;
-  return (
-    <Modal title={file.name} onClose={onClose} size="large">
-      {isImage && <img src={dataUrl} alt={file.name} style={{ maxWidth: "100%", maxHeight: "82vh", display: "block", margin: "0 auto", borderRadius: 6 }} />}
-      {isPdf && <iframe src={dataUrl} title={file.name} style={{ width: "100%", height: "82vh", border: "none" }} />}
-      {!isImage && !isPdf && (
-        <p style={{ color: C.concrete }} className="text-sm mb-3">
-          This file type can't be previewed here — download it to open it.
-        </p>
-      )}
-      <div className="mt-3">
-        <a href={dataUrl} download={file.name} style={{ color: C.navy }} className="text-xs underline">
-          Download {file.name}
-        </a>
-      </div>
-    </Modal>
   );
 }
 
@@ -316,29 +260,6 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
             </select>
           ) : f.type === "textarea" ? (
             <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals[f.key]} onChange={(e) => set(f.key, e.target.value)} />
-          ) : f.type === "file" ? (
-            <div>
-              <input
-                type="file"
-                accept={f.accept || "*/*"}
-                onChange={async (e) => {
-                  const file = e.target.files[0];
-                  e.target.value = "";
-                  if (!file) return;
-                  const isImage = file.type.startsWith("image/");
-                  const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
-                  set(f.key, { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data });
-                }}
-              />
-              {vals[f.key] && (
-                <div style={{ color: C.concrete }} className="text-xs mt-1 flex items-center gap-2">
-                  <span>{vals[f.key].name}</span>
-                  <button type="button" onClick={() => set(f.key, null)} style={{ color: C.concrete }} className="hover:text-red-600">
-                    <X size={12} />
-                  </button>
-                </div>
-              )}
-            </div>
           ) : (
             <input
               style={inputStyle}
@@ -356,83 +277,10 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
 }
 
 /* ---------------------------------------------------------------------- */
-/*  CSV import / export helpers                                            */
-/* ---------------------------------------------------------------------- */
-function csvEscape(value) {
-  const s = value === null || value === undefined ? "" : String(value);
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
-
-function toCSV(schema, items) {
-  const header = schema.map((f) => csvEscape(f.label)).join(",");
-  const rows = items.map((item) => schema.map((f) => csvEscape(item[f.key])).join(","));
-  return [header, ...rows].join("\r\n");
-}
-
-function parseCSVText(text) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let inQuotes = false;
-  const pushField = () => { row.push(field); field = ""; };
-  const pushRow = () => { rows.push(row); row = []; };
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else field += c;
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      pushField();
-    } else if (c === "\n") {
-      pushField();
-      pushRow();
-    } else if (c === "\r") {
-      // ignore — paired \n handles the row break
-    } else {
-      field += c;
-    }
-  }
-  if (field.length || row.length) { pushField(); pushRow(); }
-  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ""));
-}
-
-function rowsToItems(schema, rows) {
-  if (!rows.length) return { items: [], skipped: 0 };
-  const header = rows[0].map((h) => h.trim().toLowerCase());
-  const colForField = schema.map((f) => {
-    let idx = header.indexOf(f.label.toLowerCase());
-    if (idx === -1) idx = header.indexOf(f.key.toLowerCase());
-    return idx;
-  });
-  const items = [];
-  let skipped = 0;
-  for (let r = 1; r < rows.length; r++) {
-    const raw = rows[r];
-    if (raw.every((c) => !c || !c.trim())) continue;
-    const obj = { id: uid() };
-    schema.forEach((f, i) => {
-      const idx = colForField[i];
-      obj[f.key] = idx >= 0 && raw[idx] !== undefined ? raw[idx] : "";
-    });
-    const missingRequired = schema.some((f) => f.required && !String(obj[f.key] || "").trim());
-    if (missingRequired) { skipped++; continue; }
-    items.push(obj);
-  }
-  return { items, skipped };
-}
-
-/* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry" }) {
   const [open, setOpen] = useState(false);
-  const [importMsg, setImportMsg] = useState("");
-  const importRef = useRef();
 
   const persist = onPersist || ((next) => saveKey(storageKey, next));
 
@@ -448,40 +296,6 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
     await persist(next);
   };
 
-  const exportCSV = () => {
-    const csv = toCSV(schema, items);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${exportFileName || storageKey}-${today()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  const importCSV = async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const rows = parseCSVText(text);
-      const { items: parsed, skipped } = rowsToItems(schema, rows);
-      if (!parsed.length) {
-        setImportMsg(skipped ? `No rows imported — ${skipped} skipped (missing required fields).` : "No rows found in that file.");
-        return;
-      }
-      const next = [...parsed, ...items];
-      setItems(next);
-      await persist(next);
-      setImportMsg(`Imported ${parsed.length} ${parsed.length === 1 ? "entry" : "entries"}${skipped ? ` — ${skipped} skipped` : ""}.`);
-    } catch {
-      setImportMsg("Could not read that file — make sure it's a CSV exported from here.");
-    }
-  };
-
   return (
     <div>
       <SectionHeader
@@ -489,27 +303,11 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
         title={title}
         subtitle={subtitle}
         action={
-          <div className="flex items-center gap-2 flex-wrap">
-            {enableImportExport && (
-              <>
-                <input type="file" accept=".csv,text/csv" ref={importRef} className="hidden" onChange={importCSV} />
-                <Btn onClick={() => importRef.current.click()} tone="ghost" small>
-                  <Upload size={14} /> Import CSV
-                </Btn>
-                <Btn onClick={exportCSV} tone="ghost" small disabled={!items.length}>
-                  <Download size={14} /> Export CSV
-                </Btn>
-              </>
-            )}
-            <Btn onClick={() => setOpen(true)}>
-              <Plus size={16} /> {addLabel}
-            </Btn>
-          </div>
+          <Btn onClick={() => setOpen(true)}>
+            <Plus size={16} /> {addLabel}
+          </Btn>
         }
       />
-      {enableImportExport && importMsg && (
-        <p style={{ color: C.concrete }} className="text-xs mb-3">{importMsg}</p>
-      )}
       {items.length === 0 && (
         <p style={{ color: C.concrete }} className="text-sm italic">
           Nothing logged yet. Add your first entry.
@@ -519,8 +317,8 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
         {items.map((item) => (
           <div
             key={item.id}
-            style={{ background: C.card, border: `1px solid ${C.line}` }}
-            className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 relative"
+            style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }}
+            className="rounded-lg p-4 relative hover:shadow-md hover:-translate-y-0.5"
           >
             <button
               onClick={() => remove(item.id)}
@@ -561,9 +359,30 @@ function Dashboard({ data, setTab, currentUser }) {
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
 
+  // Monthly spend (expenses only — permission fees aren't dated per month in a useful way here)
+  const monthTotals = {};
+  expenses.forEach((e) => {
+    const m = (e.date || "").slice(0, 7);
+    if (!m) return;
+    monthTotals[m] = (monthTotals[m] || 0) + Number(e.amount || 0);
+  });
+  const monthlyChartData = Object.keys(monthTotals)
+    .sort()
+    .slice(-6)
+    .map((m) => ({ month: m.slice(2), amount: monthTotals[m] }));
+
+  // Spend by category, across expenses
+  const categoryTotals = {};
+  expenses.forEach((e) => {
+    const cat = e.category || "Other";
+    categoryTotals[cat] = (categoryTotals[cat] || 0) + Number(e.amount || 0);
+  });
+  const categoryChartData = Object.keys(categoryTotals).map((cat) => ({ name: cat, value: categoryTotals[cat] }));
+  const PIE_COLORS = [C.rust, C.navy, C.green, C.yellow, C.navyLight, C.concrete, "#8A5A44"];
+
   const stat = (label, value, tone, Icon) => (
-    <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 flex items-center gap-3">
-      <div style={{ background: tone, color: "#fff", boxShadow: "0 2px 5px rgba(0,0,0,0.18)" }} className="p-2 rounded-lg shrink-0">
+    <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 flex items-center gap-3">
+      <div style={{ background: tone, color: "#fff", boxShadow: `0 2px 6px ${tone}55` }} className="p-2.5 rounded-xl shrink-0">
         <Icon size={18} />
       </div>
       <div>
@@ -588,8 +407,49 @@ function Dashboard({ data, setTab, currentUser }) {
         {stat("Open red flags", redFlags, redFlags ? C.red : C.green, AlertTriangle)}
       </div>
 
+      {expenses.length > 0 && (
+        <div className="grid gap-4 md:grid-cols-2 mb-8">
+          <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4">
+            <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-3">
+              Monthly spend
+            </h3>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={monthlyChartData}>
+                <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.concrete, fontFamily: "IBM Plex Mono, monospace" }} axisLine={{ stroke: C.line }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: C.concrete, fontFamily: "IBM Plex Mono, monospace" }} axisLine={false} tickLine={false} width={44} tickFormatter={(v) => `₹${v >= 1000 ? (v / 1000).toFixed(0) + "k" : v}`} />
+                <Tooltip formatter={(v) => fmtINR(v)} contentStyle={{ fontFamily: "Inter, sans-serif", fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}` }} />
+                <Bar dataKey="amount" fill={C.rust} radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4">
+            <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-3">
+              Spend by category
+            </h3>
+            <ResponsiveContainer width="100%" height={200}>
+              <PieChart>
+                <Pie data={categoryChartData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={75} paddingAngle={2}>
+                  {categoryChartData.map((_, i) => (
+                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(v, n) => [fmtINR(v), n]} contentStyle={{ fontFamily: "Inter, sans-serif", fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}` }} />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 justify-center">
+              {categoryChartData.map((c, i) => (
+                <span key={c.name} style={{ color: C.concrete }} className="text-xs flex items-center gap-1">
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: PIE_COLORS[i % PIE_COLORS.length], display: "inline-block" }} />
+                  {c.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stage ledger — signature element */}
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-5 mb-8">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-5 mb-8">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide">
             Construction sequence
@@ -652,7 +512,7 @@ function Dashboard({ data, setTab, currentUser }) {
       </div>
 
       {loan.enabled && (
-        <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mt-6">
+        <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mt-6">
           <div style={{ color: C.concrete }} className="text-xs uppercase tracking-wide font-semibold mb-1">Home loan</div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-sm">
             Sanctioned {fmtINR(loan.sanctioned)} · Disbursed {fmtINR(loan.disbursed)}
@@ -676,36 +536,13 @@ const progressSchema = [
 
 function ProgressTab({ progress, setProgress, meta, setMeta }) {
   const [planDraft, setPlanDraft] = useState(meta.planText || "");
-  const [planFile, setPlanFile] = useState(meta.planFile || null);
-  const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
   const [review, setReview] = useState("");
-  const planFileRef = useRef();
   const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
 
   const savePlan = async () => {
     const next = { ...meta, planText: planDraft };
-    setMeta(next);
-    await saveKey("meta", next);
-  };
-
-  const onPickPlanFile = async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    const isImage = file.type.startsWith("image/");
-    const b64 = isImage ? await compressImage(file, 1000, 0.75) : await fileToBase64(file);
-    const nextFile = { name: file.name, type: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), b64 };
-    setPlanFile(nextFile);
-    const next = { ...meta, planFile: nextFile };
-    setMeta(next);
-    await saveKey("meta", next);
-  };
-
-  const removePlanFile = async () => {
-    setPlanFile(null);
-    const next = { ...meta, planFile: null };
     setMeta(next);
     await saveKey("meta", next);
   };
@@ -720,7 +557,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
   };
 
   const crossCheck = async () => {
-    if (!planDraft.trim() && !planFile) return;
+    if (!planDraft.trim()) return;
     setChecking(true);
     setReview("");
     try {
@@ -729,10 +566,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         .map((p) => `${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || ""} [flag: ${p.flag || "None"}]`)
         .join("\n");
       const out = await askClaude({
-        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft || "(see attached plan file)"}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
-        ...(planFile && (planFile.type.startsWith("image/") || planFile.type === "application/pdf")
-          ? { images: [{ data: planFile.b64, mimeType: planFile.type }] }
-          : {}),
+        text: `You are helping a homeowner in Bangalore who is self-building a house track whether construction is on schedule and matches the approved plan. Here is the building plan / schedule they described:\n\n${planDraft}\n\nHere is the site progress log so far (most recent first):\n\n${log || "(no entries yet)"}\n\nCross-question this like a careful project manager: identify any mismatches with the plan, sequencing problems, stages that seem delayed, or missing information you'd want to ask the homeowner about. End with a clear verdict: ON TRACK, WATCH, or RED FLAG, and why. Be concise and specific.`,
       });
       setReview(out);
     } catch (e) {
@@ -743,7 +577,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
 
   return (
     <div>
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
           Stage completion
         </h3>
@@ -773,12 +607,12 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         </div>
       </div>
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2">
           Building plan &amp; schedule
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-2">
-          Paste your approved plan, stage-wise timeline, or key milestones here, or upload the plan/schedule file itself. Claude will cross-question your day-to-day log against it.
+          Paste your approved plan, stage-wise timeline, or key milestones here. Claude will cross-question your day-to-day log against it.
         </p>
         <textarea
           style={{ ...inputStyle, minHeight: "90px" }}
@@ -788,30 +622,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
           placeholder="e.g. Foundation by 15 Sep, Superstructure by 30 Nov, Roof slab by 15 Jan…"
         />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" ref={planFileRef} className="hidden" onChange={onPickPlanFile} />
-          <Btn onClick={() => planFileRef.current.click()} tone="ghost" small>
-            <Paperclip size={14} /> {planFile ? "Replace file" : "Upload plan / schedule file"}
-          </Btn>
-          {planFile && (
-            <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
-              <button
-                onClick={() => setPlanFilePreview(true)}
-                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
-                className="underline"
-              >
-                {planFile.name}
-              </button>
-              <button onClick={removePlanFile} style={{ color: C.concrete }} className="hover:text-red-600">
-                <X size={13} />
-              </button>
-            </span>
-          )}
-        </div>
-        {planFilePreview && (
-          <FilePreview file={{ name: planFile.name, mimeType: planFile.type, data: planFile.b64 }} onClose={() => setPlanFilePreview(false)} />
-        )}
-        <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <Btn onClick={crossCheck} disabled={checking || (!planDraft.trim() && !planFile)} tone="rust">
+          <Btn onClick={crossCheck} disabled={checking || !planDraft.trim()} tone="rust">
             {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
             Cross-check progress vs. plan
           </Btn>
@@ -832,8 +643,6 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
         setItems={setProgress}
         storageKey="progress"
         addLabel="Log today's progress"
-        enableImportExport
-        exportFileName="daily-progress-log"
         renderCard={(p) => (
           <div>
             <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -870,7 +679,7 @@ function GalleryTab({ gallery, setGallery }) {
     setAnalyzing(true);
     try {
       const out = await askClaude({
-        images: [{ data: pending.b64, mimeType: "image/jpeg" }],
+        images: [pending.b64],
         text: "This is a daily progress photo from a house construction site in Bangalore, India. Look carefully and: 1) count how many people appear to be working / on-site (laborers, masons, engineers etc.) 2) count how many appear to be bystanders/visitors/not working, 3) categorize the stage of construction visible (e.g. demolition, excavation, foundation, structure, plastering, finishing etc.), 4) note anything that looks like a safety issue or something worth flagging, 5) give one short caption line. Answer in short labeled lines, no long paragraphs.",
       });
       setPending((p) => ({ ...p, note: out }));
@@ -932,7 +741,7 @@ function GalleryTab({ gallery, setGallery }) {
       {gallery.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">No photos yet.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {gallery.map((g) => (
-          <div key={g.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 overflow-hidden">
+          <div key={g.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg overflow-hidden">
             <img src={`data:image/jpeg;base64,${g.b64}`} className="w-full object-cover" style={{ height: 160 }} />
             <div className="p-3">
               <div className="flex items-center justify-between mb-1">
@@ -966,8 +775,41 @@ const loanEntrySchema = [
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
-function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, setLoan }) {
+function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, setLoan, agreement, setAgreement }) {
   const [budgetDraft, setBudgetDraft] = useState(meta.budgetAllocated || "");
+  const [markingId, setMarkingId] = useState(null); // milestone id currently being marked paid
+  const [markDraft, setMarkDraft] = useState({ paidDate: today(), paidAmount: "", notes: "" });
+
+  const agreementPaid = (agreement?.milestones || []).reduce(
+    (s, m) => s + (m.status === "Paid" ? Number(m.paidAmount || m.agreedAmount || 0) : 0), 0
+  );
+  const agreementRemaining = Number(agreement?.totalValue || 0) - agreementPaid;
+
+  const openMarkPaid = (milestone) => {
+    setMarkingId(milestone.id);
+    setMarkDraft({ paidDate: today(), paidAmount: milestone.agreedAmount, notes: "" });
+  };
+
+  const saveMarkPaid = async () => {
+    const next = {
+      ...agreement,
+      milestones: agreement.milestones.map((m) =>
+        m.id === markingId ? { ...m, status: "Paid", paidDate: markDraft.paidDate, paidAmount: markDraft.paidAmount, notes: markDraft.notes } : m
+      ),
+    };
+    setAgreement(next);
+    await saveKey("agreement", next);
+    setMarkingId(null);
+  };
+
+  const undoPaid = async (id) => {
+    const next = {
+      ...agreement,
+      milestones: agreement.milestones.map((m) => (m.id === id ? { ...m, status: "Pending", paidDate: "", paidAmount: "" } : m)),
+    };
+    setAgreement(next);
+    await saveKey("agreement", next);
+  };
 
   const saveBudget = async () => {
     const next = { ...meta, budgetAllocated: budgetDraft };
@@ -1009,7 +851,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
     <div>
       <SectionHeader icon={Wallet} title="Budget &amp; expenses" subtitle="Every rupee, from demolition to handover" />
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6 grid gap-4 sm:grid-cols-3 items-end">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6 grid gap-4 sm:grid-cols-3 items-end">
         <Field label="Total budget allocated (₹)">
           <input style={inputStyle} type="number" value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)} onBlur={saveBudget} />
         </Field>
@@ -1025,7 +867,67 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         </div>
       </div>
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
+      {/* Builder payment as per construction agreement */}
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <div>
+            <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide">
+              Builder payment — per agreement
+            </h3>
+            <p style={{ color: C.concrete }} className="text-xs">
+              {agreement?.builderName} · contract value {fmtINR(agreement?.totalValue)} · milestone-based, not fixed dates
+            </p>
+          </div>
+          <div className="flex gap-4">
+            <div className="text-right">
+              <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold">Paid</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.green }} className="text-lg font-semibold">{fmtINR(agreementPaid)}</div>
+            </div>
+            <div className="text-right">
+              <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold">Remaining</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(agreementRemaining)}</div>
+            </div>
+          </div>
+        </div>
+        <div className="space-y-2">
+          {(agreement?.milestones || []).map((m) => (
+            <div key={m.id} style={{ border: `1px solid ${C.line}`, background: m.status === "Paid" ? "#fff" : "rgba(0,0,0,0.015)" }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <div style={{ color: C.ink }} className="text-sm font-semibold">{m.milestone}</div>
+                <div style={{ color: C.concrete }} className="text-xs">
+                  {m.percent}% · agreed {fmtINR(m.agreedAmount)}
+                  {m.status === "Paid" && ` · paid ${fmtINR(m.paidAmount || m.agreedAmount)} on ${m.paidDate}`}
+                </div>
+              </div>
+              {m.status === "Paid" ? (
+                <div className="flex items-center gap-2">
+                  <Stamp tone="green">Paid</Stamp>
+                  <button onClick={() => undoPaid(m.id)} style={{ color: C.concrete }} className="text-xs underline">undo</button>
+                </div>
+              ) : (
+                <Btn small onClick={() => openMarkPaid(m)}>Mark paid</Btn>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {markingId && (
+        <Modal title="Mark milestone paid" onClose={() => setMarkingId(null)}>
+          <Field label="Date paid">
+            <input style={inputStyle} type="date" value={markDraft.paidDate} onChange={(e) => setMarkDraft({ ...markDraft, paidDate: e.target.value })} />
+          </Field>
+          <Field label="Amount paid (₹)">
+            <input style={inputStyle} type="number" value={markDraft.paidAmount} onChange={(e) => setMarkDraft({ ...markDraft, paidAmount: e.target.value })} />
+          </Field>
+          <Field label="Notes (optional)">
+            <textarea style={{ ...inputStyle, minHeight: 70 }} value={markDraft.notes} onChange={(e) => setMarkDraft({ ...markDraft, notes: e.target.value })} />
+          </Field>
+          <Btn onClick={saveMarkPaid}>Save</Btn>
+        </Modal>
+      )}
+
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-3">
           Monthly report
         </h3>
@@ -1063,7 +965,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         )}
       />
 
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mt-8">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mt-8">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <Landmark size={18} style={{ color: C.navy }} />
@@ -1197,46 +1099,26 @@ const productSchema = [
   { key: "item", label: "Item", type: "text", required: true },
   { key: "room", label: "Room / area", type: "text" },
   { key: "brand", label: "Brand / model", type: "text" },
-  { key: "productId", label: "Product ID / material no. (optional)", type: "text" },
   { key: "price", label: "Price paid (₹)", type: "number" },
   { key: "claimedPrice", label: "Builder's quoted price (₹)", type: "number" },
   { key: "vendor", label: "Vendor / shop", type: "text" },
-  { key: "image", label: "Photo (helps you identify the exact product later)", type: "file", accept: "image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
 function ProductsTab({ products, setProducts }) {
   const [checkItem, setCheckItem] = useState("");
-  const [checkId, setCheckId] = useState("");
   const [checkPrice, setCheckPrice] = useState("");
-  const [checkImage, setCheckImage] = useState(null);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState("");
-  const [preview, setPreview] = useState(null);
-  const checkImageRef = useRef();
-
-  const onPickCheckImage = async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    const data = await compressImage(file, 1000, 0.75);
-    setCheckImage({ name: file.name, mimeType: "image/jpeg", data });
-  };
 
   const runCheck = async () => {
-    if (!checkItem.trim() && !checkImage) return;
+    if (!checkItem.trim()) return;
     setChecking(true);
     setResult("");
     try {
-      const idPart = checkId.trim() ? ` (product ID / model number: "${checkId.trim()}")` : "";
-      const pricePart = checkPrice ? ` at ₹${checkPrice}` : "";
-      const text = checkImage
-        ? `A construction builder in Bangalore, India quoted this item${checkItem.trim() ? `: "${checkItem}"` : ""}${idPart}${pricePart}. A photo of the item is attached — use it to identify the exact product (brand, type, likely model) if that isn't already clear from the description. Then search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) what you think the product is, 2) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 3) 2-3 specific alternative brands/models at a similar or better price, 4) a one-line verdict. Keep it short and practical.`
-        : `A construction builder in Bangalore, India quoted this item: "${checkItem}"${idPart}${pricePart}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`;
       const out = await askClaude({
         useSearch: true,
-        text,
-        ...(checkImage ? { images: [{ data: checkImage.data, mimeType: checkImage.mimeType }] } : {}),
+        text: `A construction builder in Bangalore, India quoted this item: "${checkItem}"${checkPrice ? ` at ₹${checkPrice}` : ""}. Search the web for typical current market prices for this item in India (Bangalore where relevant). Tell me: 1) whether the quoted price seems fair, overpriced, or a good deal, with a rough price range you found, 2) 2-3 specific alternative brands/models at a similar or better price, 3) a one-line verdict. Keep it short and practical.`,
       });
       setResult(out);
     } catch {
@@ -1247,45 +1129,21 @@ function ProductsTab({ products, setProducts }) {
 
   return (
     <div>
-      <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 mb-6">
+      <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
         <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-2 flex items-center gap-2">
           <Search size={16} /> Check a builder's quote
         </h3>
-        <p style={{ color: C.concrete }} className="text-xs mb-3">
-          Describe the item, or attach a photo and let AI identify it — either way you'll get a market price check.
-        </p>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-3 items-end">
           <Field label="Item the builder quoted">
             <input style={inputStyle} value={checkItem} onChange={(e) => setCheckItem(e.target.value)} placeholder="e.g. Kajaria vitrified tile 2x2" />
-          </Field>
-          <Field label="Product ID / model number (optional)">
-            <input style={inputStyle} value={checkId} onChange={(e) => setCheckId(e.target.value)} placeholder="e.g. SKU, batch or model code" />
           </Field>
           <Field label="Their quoted price (₹, optional)">
             <input style={inputStyle} type="number" value={checkPrice} onChange={(e) => setCheckPrice(e.target.value)} />
           </Field>
-          <Field label="Photo (optional)">
-            <div className="flex items-center gap-2 flex-wrap">
-              <input type="file" accept="image/*" ref={checkImageRef} className="hidden" onChange={onPickCheckImage} />
-              <Btn onClick={() => checkImageRef.current.click()} tone="ghost" small>
-                <Paperclip size={14} /> {checkImage ? "Replace photo" : "Attach photo"}
-              </Btn>
-              {checkImage && (
-                <span style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.ink }} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md">
-                  <button type="button" onClick={() => setPreview(checkImage)} style={{ color: C.navy }} className="underline">
-                    {checkImage.name}
-                  </button>
-                  <button type="button" onClick={() => setCheckImage(null)} style={{ color: C.concrete }} className="hover:text-red-600">
-                    <X size={13} />
-                  </button>
-                </span>
-              )}
-            </div>
-          </Field>
+          <Btn onClick={runCheck} disabled={checking} tone="rust">
+            {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
+          </Btn>
         </div>
-        <Btn onClick={runCheck} disabled={checking || (!checkItem.trim() && !checkImage)} tone="rust">
-          {checking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Check price
-        </Btn>
         {result && <div style={{ background: "#fff", border: `1px solid ${C.line}`, whiteSpace: "pre-wrap" }} className="mt-4 rounded-md p-3 text-sm">{result}</div>}
       </div>
 
@@ -1299,33 +1157,18 @@ function ProductsTab({ products, setProducts }) {
         storageKey="products"
         addLabel="Add product"
         renderCard={(p) => (
-          <div className="flex items-start gap-3">
-            {p.image && (
-              <button type="button" onClick={() => setPreview(p.image)} className="shrink-0">
-                <img
-                  src={`data:${p.image.mimeType};base64,${p.image.data}`}
-                  alt={p.item}
-                  style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.line}` }}
-                />
-              </button>
-            )}
-            <div className="min-w-0">
-              <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
-              <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
-              {p.productId && (
-                <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs mb-1">ID: {p.productId}</div>
-              )}
-              <div className="flex items-center gap-3">
-                {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
-                {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
-              </div>
-              {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
-              {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
+          <div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{p.item}</div>
+            <div style={{ color: C.concrete }} className="text-xs mb-1">{p.room} {p.brand && `· ${p.brand}`}</div>
+            <div className="flex items-center gap-3">
+              {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
+              {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
             </div>
+            {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
+            {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
           </div>
         )}
       />
-      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -1338,99 +1181,33 @@ const documentSchema = [
   { key: "type", label: "Type", type: "select", options: ["Bill", "Agreement", "Receipt", "Other"], required: true },
   { key: "date", label: "Date", type: "date" },
   { key: "amount", label: "Amount (₹)", type: "number" },
-  { key: "attachment", label: "Attach file (photo, PDF, scan)", type: "file", accept: ".pdf,.doc,.docx,image/*" },
+  { key: "vendor", label: "Vendor / party", type: "text" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
-function DocumentsTab({ documents, setDocuments, currentUser }) {
-  const [open, setOpen] = useState(false);
-  const [preview, setPreview] = useState(null);
-  const isOwner = currentUser?.role === "owner";
-
-  // Bills, receipts, and "other" are private to whoever uploaded them
-  // (plus the owner, who sees everything). Agreements are shared between
-  // the builder and the owner only.
-  const canSee = (d) => {
-    if (isOwner) return true;
-    if (d.type === "Agreement") return currentUser?.role === "builder";
-    return !!d.uploadedBy && d.uploadedBy === currentUser?.id;
-  };
-  const visible = documents.filter(canSee);
-
-  // Deliberately operate on the FULL `documents` array here, not
-  // `visible` — persisting a filtered subset would silently drop every
-  // document this viewer can't see.
-  const add = async (vals) => {
-    const doc = { id: uid(), uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", ...vals };
-    const next = [doc, ...documents];
-    setDocuments(next);
-    setOpen(false);
-    const ok = await saveKey("documents", next);
-    console.log(ok ? `[SiteLedger] Document uploaded: "${doc.title}" (${doc.type})` : `[SiteLedger] Document upload FAILED: "${doc.title}"`);
-  };
-  const remove = async (id) => {
-    const next = documents.filter((d) => d.id !== id);
-    setDocuments(next);
-    await saveKey("documents", next);
-  };
-
+function DocumentsTab({ documents, setDocuments }) {
   return (
-    <div>
-      <SectionHeader
-        icon={FileText}
-        title="Bills &amp; agreements"
-        subtitle={
-          isOwner
-            ? "Keep a record for future reference and disputes"
-            : "Your bills/receipts are private to you and the owner; agreements are shared with the builder and owner"
-        }
-        action={
-          <Btn onClick={() => setOpen(true)}>
-            <Plus size={16} /> Add document
-          </Btn>
-        }
-      />
-      {visible.length === 0 && (
-        <p style={{ color: C.concrete }} className="text-sm italic">Nothing here yet.</p>
-      )}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {visible.map((d) => (
-          <div key={d.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 p-4 relative">
-            <button
-              onClick={() => remove(d.id)}
-              style={{ color: C.concrete }}
-              className="absolute top-3 right-3 hover:text-red-600"
-            >
-              <Trash2 size={15} />
-            </button>
-            <div className="flex items-center justify-between mb-1">
-              <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
-              <Stamp tone="navy">{d.type}</Stamp>
-            </div>
-            <div style={{ color: C.concrete }} className="text-xs mb-1">
-              {d.date}{isOwner && d.uploadedByName ? ` · ${d.uploadedByName}` : ""}
-            </div>
-            {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
-            <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
-            {d.attachment && (
-              <button
-                onClick={() => setPreview(d.attachment)}
-                style={{ color: C.navy, background: "none", border: "none", padding: 0, cursor: "pointer" }}
-                className="text-xs underline mt-2 inline-flex items-center gap-1"
-              >
-                <Paperclip size={12} /> {d.attachment.name}
-              </button>
-            )}
+    <ListSection
+      icon={FileText}
+      title="Bills &amp; agreements"
+      subtitle="Keep a record for future reference and disputes"
+      schema={documentSchema}
+      items={documents}
+      setItems={setDocuments}
+      storageKey="documents"
+      addLabel="Add document"
+      renderCard={(d) => (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold uppercase text-sm">{d.title}</span>
+            <Stamp tone="navy">{d.type}</Stamp>
           </div>
-        ))}
-      </div>
-      {open && (
-        <Modal title="Add document" onClose={() => setOpen(false)}>
-          <SchemaForm schema={documentSchema} onSubmit={add} />
-        </Modal>
+          <div style={{ color: C.concrete }} className="text-xs mb-1">{d.date} {d.vendor && `· ${d.vendor}`}</div>
+          {d.amount ? <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">{fmtINR(d.amount)}</div> : null}
+          <p style={{ color: C.ink }} className="text-sm mt-1">{d.notes}</p>
+        </div>
       )}
-      <FilePreview file={preview} onClose={() => setPreview(null)} />
-    </div>
+    />
   );
 }
 
@@ -1506,7 +1283,7 @@ function TeamTab({ currentUserEmail }) {
       {members === null && <p style={{ color: C.concrete }} className="text-sm italic">Loading…</p>}
       <div className="space-y-2">
         {members?.map((m) => (
-          <div key={m.user_id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+          <div key={m.user_id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-md px-4 py-3 flex items-center justify-between flex-wrap gap-2">
             <div>
               <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm">{m.profiles?.name || m.profiles?.email}</div>
               <div style={{ color: C.concrete }} className="text-xs">{m.profiles?.email}{m.profiles?.email === currentUserEmail && " · you"}</div>
@@ -1547,10 +1324,8 @@ function AuditLogTab() {
 
   const actionLabel = {
     login: "Signed in",
-    login_failed: "Sign-in failed",
     logout: "Signed out",
     data_saved: "Updated data",
-    save_failed: "Save failed",
     project_created: "Created the project",
     project_joined: "Joined the project",
     role_changed: "Changed a role",
@@ -1563,7 +1338,7 @@ function AuditLogTab() {
       {entries?.length === 0 && <p style={{ color: C.concrete }} className="text-sm italic">Nothing logged yet.</p>}
       <div className="space-y-2">
         {entries?.map((e) => (
-          <div key={e.id} style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2 shadow-sm hover:shadow-md transition-shadow duration-200">
+          <div key={e.id} style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-md px-4 py-2.5 flex items-center justify-between flex-wrap gap-2">
             <div>
               <span style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="text-sm font-semibold uppercase">
                 {actionLabel[e.action] || e.action}
@@ -1616,10 +1391,11 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   const [documents, setDocuments] = useState([]);
   const [issues, setIssues] = useState([]);
   const [loan, setLoan] = useState({ enabled: false, sanctioned: "", disbursed: "", entries: [] });
+  const [agreement, setAgreement] = useState(DEFAULT_AGREEMENT);
 
   useEffect(() => {
     (async () => {
-      const [m, p, g, e, perm, c, prod, doc, iss, l] = await Promise.all([
+      const [m, p, g, e, perm, c, prod, doc, iss, l, agr] = await Promise.all([
         loadKey("meta", { projectName: "Site Ledger", budgetAllocated: "", planText: "", completedStages: [] }),
         loadKey("progress", []),
         loadKey("gallery", []),
@@ -1630,9 +1406,11 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
         loadKey("documents", []),
         loadKey("issues", []),
         loadKey("loan", { enabled: false, sanctioned: "", disbursed: "", entries: [] }),
+        loadKey("agreement", DEFAULT_AGREEMENT),
       ]);
       setMeta(m); setProgress(p); setGallery(g); setExpenses(e); setPermissions(perm);
       setContacts(c); setProducts(prod); setDocuments(doc); setIssues(iss); setLoan(l);
+      setAgreement(agr);
       setLoaded(true);
     })();
   }, []);
@@ -1651,7 +1429,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   return (
     <div style={{ background: C.paper, minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
       <style>{FONTS}</style>
-      <header style={{ background: C.navy, boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }} className="text-white sticky top-0 z-40">
+      <header style={{ background: `linear-gradient(180deg, ${C.navy} 0%, #122841 100%)` }} className="text-white sticky top-0 z-40 shadow-lg">
         <div className="max-w-6xl mx-auto px-4 pt-4 pb-0">
           <div className="flex items-center gap-2 mb-3">
             <Hammer size={22} style={{ color: C.yellow }} />
@@ -1692,12 +1470,15 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
                   onClick={() => setTab(t.key)}
                   style={{
                     borderBottom: active ? `3px solid ${C.rust}` : "3px solid transparent",
+                    background: active ? "rgba(255,255,255,0.06)" : "transparent",
                     color: active ? "#fff" : "#B9C7D4",
                     fontFamily: "'Inter', sans-serif",
                     whiteSpace: "nowrap",
-                    transition: "color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease",
+                    transition: "background 150ms, color 150ms",
+                    borderTopLeftRadius: 6,
+                    borderTopRightRadius: 6,
                   }}
-                  className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-semibold rounded-t-md hover:bg-white/5 hover:text-white"
+                  className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-semibold hover:text-white hover:bg-white/5"
                 >
                   <Icon size={15} /> {t.label}
                 </button>
@@ -1716,12 +1497,13 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
             expenses={expenses} setExpenses={setExpenses}
             permissions={permissions} meta={meta} setMeta={setMeta}
             loan={loan} setLoan={setLoan}
+            agreement={agreement} setAgreement={setAgreement}
           />
         )}
         {tab === "permissions" && canSee("permissions") && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
         {tab === "people" && canSee("people") && <PeopleTab contacts={contacts} setContacts={setContacts} />}
         {tab === "products" && canSee("products") && <ProductsTab products={products} setProducts={setProducts} />}
-        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} currentUser={currentUser} />}
+        {tab === "documents" && canSee("documents") && <DocumentsTab documents={documents} setDocuments={setDocuments} />}
         {tab === "issues" && <IssuesTab issues={issues} setIssues={setIssues} />}
         {tab === "team" && currentUser?.role === "owner" && <TeamTab currentUserEmail={currentUser.email} />}
         {tab === "audit" && currentUser?.role === "owner" && <AuditLogTab />}

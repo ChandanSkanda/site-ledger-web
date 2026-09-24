@@ -7,26 +7,15 @@ import { SIGNUP_ROLES, PROJECT_TYPES } from "./lib/roles";
 import App from "./App";
 
 const C = { navy: "#16324F", rust: "#B7451F", paper: "#E7E2D3", ink: "#20242A", concrete: "#7C7768", line: "#CFC8B6" };
-const inputStyle = { border: `1.5px solid ${C.line}`, borderRadius: 7, padding: "9px 11px", width: "100%", transition: "border-color 0.15s ease, box-shadow 0.15s ease" };
+const inputStyle = { border: `1.5px solid ${C.line}`, borderRadius: 6, padding: "8px 10px", width: "100%" };
 const labelStyle = { color: C.concrete };
 
 function AuthCard({ children, wide }) {
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: `radial-gradient(circle at 20% 15%, ${C.navy}22 0%, transparent 45%), radial-gradient(circle at 85% 85%, ${C.rust}1a 0%, transparent 45%), ${C.paper}`,
-      }}
-      className="flex items-center justify-center p-4"
-    >
-      <div
-        style={{ background: "#fff", border: `1px solid ${C.line}`, boxShadow: "0 10px 30px rgba(22,50,79,0.15)" }}
-        className={`ledger-fade-up w-full ${wide ? "max-w-md" : "max-w-sm"} rounded-xl p-7`}
-      >
+    <div style={{ background: C.paper, minHeight: "100vh" }} className="flex items-center justify-center p-4">
+      <div style={{ background: "#fff", border: `1px solid ${C.line}` }} className={`w-full ${wide ? "max-w-md" : "max-w-sm"} rounded-lg p-6`}>
         <div className="flex items-center gap-2 mb-5">
-          <div style={{ background: C.navy, boxShadow: "0 2px 6px rgba(22,50,79,0.35)" }} className="p-2 rounded-lg">
-            <Hammer style={{ color: C.paper }} size={18} />
-          </div>
+          <Hammer style={{ color: C.rust }} size={22} />
           <span style={{ color: C.ink, fontWeight: 700 }} className="text-lg uppercase tracking-wide">Site Ledger</span>
         </div>
         {children}
@@ -55,12 +44,9 @@ function LoginScreen({ onSwitchToSignUp }) {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (error) {
-      console.error(`[SiteLedger] Sign-in FAILED for ${email}:`, error.message);
-      await logAudit("login_failed", { email, error: error.message });
       setError(error.message);
       return;
     }
-    console.log(`[SiteLedger] Sign-in successful for ${email}`);
     logAudit("login", { email });
   };
 
@@ -76,7 +62,7 @@ function LoginScreen({ onSwitchToSignUp }) {
           <input style={inputStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
         </label>
         {error && <p style={{ color: "#A33A2E" }} className="text-sm mb-3">{error}</p>}
-        <button type="submit" disabled={loading} style={{ background: C.navy, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%", boxShadow: "0 1px 2px rgba(22,50,79,0.18)" }} className="font-semibold text-sm flex items-center justify-center gap-2 rounded-md hover:opacity-85 hover:shadow-md transition disabled:opacity-60">
+        <button type="submit" disabled={loading} style={{ background: C.navy, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%" }} className="font-semibold text-sm flex items-center justify-center gap-2">
           {loading ? <Loader2 size={16} className="animate-spin" /> : "Sign in"}
         </button>
       </form>
@@ -139,7 +125,7 @@ function SignUpScreen({ onSwitchToSignIn }) {
           <input style={inputStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} />
         </label>
         {error && <p style={{ color: "#A33A2E" }} className="text-sm mb-3">{error}</p>}
-        <button type="submit" disabled={loading} style={{ background: C.rust, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%", boxShadow: "0 1px 2px rgba(22,50,79,0.18)" }} className="font-semibold text-sm flex items-center justify-center gap-2 rounded-md hover:opacity-85 hover:shadow-md transition disabled:opacity-60">
+        <button type="submit" disabled={loading} style={{ background: C.rust, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%" }} className="font-semibold text-sm flex items-center justify-center gap-2">
           {loading ? <Loader2 size={16} className="animate-spin" /> : "Create account"}
         </button>
       </form>
@@ -266,7 +252,7 @@ function ProjectGate({ userId, onReady }) {
             </select>
           </label>
           {error && <p style={{ color: "#A33A2E" }} className="text-sm mb-3">{error}</p>}
-          <button type="submit" disabled={loading} style={{ background: C.rust, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%", boxShadow: "0 1px 2px rgba(22,50,79,0.18)" }} className="font-semibold text-sm flex items-center justify-center gap-2 rounded-md hover:opacity-85 hover:shadow-md transition disabled:opacity-60">
+          <button type="submit" disabled={loading} style={{ background: C.rust, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%" }} className="font-semibold text-sm flex items-center justify-center gap-2">
             {loading ? <Loader2 size={16} className="animate-spin" /> : "Create project — I'm the owner"}
           </button>
         </form>
@@ -283,7 +269,7 @@ function ProjectGate({ userId, onReady }) {
             </select>
           </label>
           {error && <p style={{ color: "#A33A2E" }} className="text-sm mb-3">{error}</p>}
-          <button type="submit" disabled={loading} style={{ background: C.navy, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%", boxShadow: "0 1px 2px rgba(22,50,79,0.18)" }} className="font-semibold text-sm flex items-center justify-center gap-2 rounded-md hover:opacity-85 hover:shadow-md transition disabled:opacity-60">
+          <button type="submit" disabled={loading} style={{ background: C.navy, color: "#fff", borderRadius: 6, padding: "10px 0", width: "100%" }} className="font-semibold text-sm flex items-center justify-center gap-2">
             {loading ? <Loader2 size={16} className="animate-spin" /> : "Join project"}
           </button>
         </form>
@@ -444,7 +430,6 @@ export default function AuthGate() {
     <App
       key={activeMembership.project_id}
       currentUser={{
-        id: session.user.id,
         email: session.user.email,
         name,
         role: activeMembership.role,
