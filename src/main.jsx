@@ -8,3 +8,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <AuthGate />
   </React.StrictMode>
 );
+
+// Lets Android (Chrome) offer "Install app" / "Add to Home screen".
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("Service worker not registered", e));
+  });
+}

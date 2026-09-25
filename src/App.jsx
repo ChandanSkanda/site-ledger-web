@@ -2673,6 +2673,32 @@ const OWNER_TABS = [
   { key: "audit", label: "Audit Log", icon: ShieldCheck },
 ];
 
+// Shows "Install app" in the header when Chrome on Android says the app can
+// be installed; hidden once it's installed or on browsers that don't support it.
+function InstallAppButton() {
+  const [prompt, setPrompt] = useState(null);
+  useEffect(() => {
+    const onPrompt = (e) => { e.preventDefault(); setPrompt(e); };
+    const onInstalled = () => setPrompt(null);
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+  if (!prompt) return null;
+  return (
+    <button
+      onClick={async () => { prompt.prompt(); await prompt.userChoice; setPrompt(null); }}
+      style={{ color: C.yellow }}
+      className="flex items-center gap-1 text-xs font-semibold"
+    >
+      <Download size={14} /> Install app
+    </button>
+  );
+}
+
 export default function App({ currentUser, onSignOut, onSwitchProject }) {
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
@@ -2744,6 +2770,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
                   </span>
                 </span>
               )}
+              <InstallAppButton />
               {onSwitchProject && (
                 <button onClick={onSwitchProject} style={{ color: "#B9C7D4" }} className="flex items-center gap-1 text-xs">
                   <Repeat size={14} /> Projects
