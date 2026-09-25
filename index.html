@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-    <title>Site Ledger</title>
+    <title>Construction AI Ledger</title>
     <meta name="theme-color" content="#16324F" />
     <meta name="description" content="Track your house construction — daily progress, photos, budget, documents and AI checks." />
     <link rel="manifest" href="/manifest.webmanifest" />
@@ -11,13 +11,13 @@
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Site Ledger" />
+    <meta name="apple-mobile-web-app-title" content="AI Ledger" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
     <script>
-      // Service worker: lets Android install Site Ledger as an app.
+      // Service worker: lets Android install Construction AI Ledger as an app.
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("/sw.js").catch(function (e) { console.warn("Service worker not registered", e); });
       }

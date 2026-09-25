@@ -1,4 +1,4 @@
-// Site Ledger service worker — makes the app installable on Android and
+// Construction AI Ledger service worker — makes the app installable on Android and
 // shows the last-loaded app shell if the phone briefly loses signal.
 // It never caches your data or AI calls: those always go to the network,
 // so everyone sees the latest entries.

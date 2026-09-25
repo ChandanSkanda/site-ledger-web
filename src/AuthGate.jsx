@@ -27,7 +27,7 @@ function AuthCard({ children, wide }) {
           <div style={{ background: C.navy, boxShadow: "0 2px 6px rgba(22,50,79,0.35)" }} className="p-2 rounded-lg">
             <Hammer style={{ color: C.paper }} size={18} />
           </div>
-          <span style={{ color: C.ink, fontWeight: 700 }} className="text-lg uppercase tracking-wide">Site Ledger</span>
+          <span style={{ color: C.ink, fontWeight: 700 }} className="text-lg uppercase tracking-wide">Construction AI Ledger</span>
         </div>
         {children}
       </div>

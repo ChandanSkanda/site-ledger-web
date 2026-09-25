@@ -1,6 +1,6 @@
 {
-  "name": "Site Ledger",
-  "short_name": "Site Ledger",
+  "name": "Construction AI Ledger",
+  "short_name": "AI Ledger",
   "description": "Track your house construction \u2014 daily progress, photos, budget, documents and AI checks.",
   "id": "/",
   "start_url": "/",

@@ -773,7 +773,7 @@ function Dashboard({ data, setTab, currentUser }) {
     <div>
       <SectionHeader
         icon={Home}
-        title={currentUser?.projectName || meta.projectName || "Site Ledger"}
+        title={currentUser?.projectName || meta.projectName || "Construction AI Ledger"}
         subtitle={[currentUser?.projectType, currentUser?.projectPlace].filter(Boolean).join(" · ") || "Construction dashboard"}
       />
 
@@ -2703,7 +2703,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
 
-  const [meta, setMeta] = useState({ projectName: "Site Ledger", budgetAllocated: "", planText: "", completedStages: [] });
+  const [meta, setMeta] = useState({ projectName: "Construction AI Ledger", budgetAllocated: "", planText: "", completedStages: [] });
   const [progress, setProgress] = useState([]);
   const [gallery, setGallery] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -2718,7 +2718,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
   useEffect(() => {
     (async () => {
       const [m, p, g, e, perm, c, prod, doc, iss, l, agr] = await Promise.all([
-        loadKey("meta", { projectName: "Site Ledger", budgetAllocated: "", planText: "", completedStages: [] }),
+        loadKey("meta", { projectName: "Construction AI Ledger", budgetAllocated: "", planText: "", completedStages: [] }),
         loadKey("progress", []),
         loadKey("gallery", []),
         loadKey("expenses", []),
@@ -2756,7 +2756,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
           <div className="flex items-center gap-2 mb-3">
             <Hammer size={22} style={{ color: C.yellow }} />
             <span style={{ fontFamily: "'Oswald', sans-serif" }} className="text-lg font-semibold tracking-wide uppercase">
-              {currentUser?.projectName || "Site Ledger"}
+              {currentUser?.projectName || "Construction AI Ledger"}
             </span>
             <span style={{ color: "#9FB4C7" }} className="text-xs ml-1">
               {[currentUser?.projectType, currentUser?.projectPlace].filter(Boolean).join(" · ") || "Build tracker"}
