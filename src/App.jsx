@@ -332,6 +332,85 @@ function FilePreview({ file, onClose }) {
   );
 }
 
+// Attachments used to be a single file; fields marked "multiple" now hold a
+// list. This reads either shape so older entries keep working.
+const asFileList = (v) => (Array.isArray(v) ? v.filter(Boolean) : v ? [v] : []);
+
+// File picker that clearly shows what's attached. (The browser's own
+// "Choose File / No file chosen" box resets after we read the file, which
+// made it look like nothing was attached.)
+function FileField({ accept, value, onChange, multiple }) {
+  const ref = useRef();
+  const [busy, setBusy] = useState(false);
+  const files = asFileList(value);
+
+  const readFile = async (file) => {
+    const isImage = file.type.startsWith("image/");
+    const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
+    return { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data };
+  };
+
+  const removeAt = (idx) => {
+    const next = files.filter((_, k) => k !== idx);
+    onChange(multiple ? next : null);
+  };
+
+  return (
+    <div>
+      <input
+        type="file"
+        ref={ref}
+        className="hidden"
+        multiple={!!multiple}
+        accept={accept || "*/*"}
+        onChange={async (e) => {
+          const picked = Array.from(e.target.files || []);
+          e.target.value = "";
+          if (!picked.length) return;
+          setBusy(true);
+          const read = await Promise.all(picked.map(readFile));
+          onChange(multiple ? [...files, ...read] : read[0]);
+          setBusy(false);
+        }}
+      />
+      <div className="space-y-2">
+        {files.map((f, idx) => {
+          const isImg = (f.mimeType || "").startsWith("image/");
+          return (
+            <div key={idx} style={{ background: "#fff", border: `1.5px solid ${C.green}` }} className="rounded-md p-2 flex items-center gap-3">
+              {isImg ? (
+                <img src={`data:${f.mimeType};base64,${f.data}`} alt="" className="rounded object-cover shrink-0" style={{ width: 52, height: 52 }} />
+              ) : (
+                <div style={{ background: C.paper, color: C.navy, width: 52, height: 52 }} className="rounded flex items-center justify-center shrink-0"><FileText size={22} /></div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div style={{ color: C.green }} className="text-xs font-semibold flex items-center gap-1"><CheckCircle2 size={13} /> Attached</div>
+                <div style={{ color: C.ink }} className="text-xs truncate">{f.name}</div>
+              </div>
+              {!multiple && (
+                <button type="button" onClick={() => ref.current.click()} style={{ color: C.navy }} className="text-xs underline shrink-0">Replace</button>
+              )}
+              <button type="button" onClick={() => removeAt(idx)} title="Remove" style={{ color: C.concrete }} className="shrink-0 hover:text-red-600"><X size={15} /></button>
+            </div>
+          );
+        })}
+        {(multiple || files.length === 0) && (
+          <button
+            type="button"
+            onClick={() => ref.current.click()}
+            disabled={busy}
+            style={{ border: `1.5px dashed ${C.line}`, color: C.concrete, background: "#fff" }}
+            className="w-full rounded-md py-3 flex items-center justify-center gap-2 text-sm font-semibold hover:opacity-80"
+          >
+            {busy ? <Loader2 size={16} className="animate-spin" /> : files.length ? <Plus size={16} /> : <Paperclip size={16} />}
+            {busy ? "Attaching…" : files.length ? "Add another file" : multiple ? "Choose files (you can pick several)" : "Choose file"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Generic schema-driven form                                             */
 /* ---------------------------------------------------------------------- */
@@ -361,28 +440,7 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
           ) : f.type === "textarea" ? (
             <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals[f.key]} onChange={(e) => set(f.key, e.target.value)} />
           ) : f.type === "file" ? (
-            <div>
-              <input
-                type="file"
-                accept={f.accept || "*/*"}
-                onChange={async (e) => {
-                  const file = e.target.files[0];
-                  e.target.value = "";
-                  if (!file) return;
-                  const isImage = file.type.startsWith("image/");
-                  const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
-                  set(f.key, { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data });
-                }}
-              />
-              {vals[f.key] && (
-                <div style={{ color: C.concrete }} className="text-xs mt-1 flex items-center gap-2">
-                  <span>{vals[f.key].name}</span>
-                  <button type="button" onClick={() => set(f.key, null)} style={{ color: C.concrete }} className="hover:text-red-600">
-                    <X size={12} />
-                  </button>
-                </div>
-              )}
-            </div>
+            <FileField accept={f.accept} multiple={f.multiple} value={vals[f.key]} onChange={(v) => set(f.key, v)} />
           ) : (
             <input
               style={inputStyle}
@@ -1524,6 +1582,19 @@ function AttachmentThumb({ file, label }) {
   );
 }
 
+// Row of thumbnails for one or more attached files.
+function AttachmentList({ files, label }) {
+  const list = asFileList(files);
+  if (!list.length) return null;
+  return (
+    <div className="flex flex-wrap gap-x-4">
+      {list.map((f, i) => (
+        <AttachmentThumb key={i} file={f} label={list.length > 1 ? `${label} ${i + 1}` : label} />
+      ))}
+    </div>
+  );
+}
+
 const GALLERY_SECTIONS = [
   { key: "all", label: "All" },
   { key: "site", label: "Site photos" },
@@ -1601,12 +1672,14 @@ function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, d
   });
   if (canSeeTab("budget")) {
     expenses.forEach((e) => {
-      if (!e.receipt?.data) return;
-      tiles.push({ id: `e-${e.id}`, section: "expenses", date: e.date, title: `${fmtINR(e.amount)} · ${e.category || "Expense"}`, note: [e.description, e.paidTo && `Paid to ${e.paidTo}`].filter(Boolean).join(" · "), file: e.receipt });
+      asFileList(e.receipt).filter(isImageFile).forEach((f, i) =>
+        tiles.push({ id: `e-${e.id}-${i}`, section: "expenses", date: e.date, title: `${fmtINR(e.amount)} · ${e.category || "Expense"}`, note: [e.description, e.paidTo && `Paid to ${e.paidTo}`].filter(Boolean).join(" · "), file: f })
+      );
     });
     (loan?.enabled ? loan.entries || [] : []).forEach((l) => {
-      if (!isImageFile(l.proof)) return;
-      tiles.push({ id: `l-${l.id}`, section: "expenses", date: l.date, title: `${fmtINR(l.amount)} · Loan ${l.type || "entry"}`, note: l.notes, file: l.proof });
+      asFileList(l.proof).filter(isImageFile).forEach((f, i) =>
+        tiles.push({ id: `l-${l.id}-${i}`, section: "expenses", date: l.date, title: `${fmtINR(l.amount)} · Loan ${l.type || "entry"}`, note: l.notes, file: f })
+      );
     });
   }
   if (canSeeTab("products")) {
@@ -1734,13 +1807,13 @@ const expenseSchema = [
   { key: "amount", label: "Amount (₹)", type: "number", required: true },
   { key: "paidTo", label: "Paid to", type: "text" },
   { key: "mode", label: "Mode", type: "select", options: ["Cash", "UPI", "Bank Transfer", "Cheque", "Card"] },
-  { key: "receipt", label: "Payment screenshot / receipt (optional)", type: "file", accept: "image/*,.pdf" },
+  { key: "receipt", label: "Payment screenshots / receipts (optional)", type: "file", accept: "image/*,.pdf", multiple: true },
 ];
 const loanEntrySchema = [
   { key: "date", label: "Date", type: "date", required: true },
   { key: "type", label: "Type", type: "select", options: ["Sanction", "Disbursement", "EMI Paid", "Other"], required: true },
   { key: "amount", label: "Amount (₹)", type: "number", required: true },
-  { key: "proof", label: "Proof — screenshot or bank statement (optional)", type: "file", accept: "image/*,.pdf" },
+  { key: "proof", label: "Proof — screenshots or bank statements (optional)", type: "file", accept: "image/*,.pdf", multiple: true },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
 
@@ -1939,7 +2012,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(e.amount)}</div>
             <p style={{ color: C.ink }} className="text-sm">{e.description}</p>
             {e.paidTo && <p style={{ color: C.concrete }} className="text-xs mt-1">Paid to {e.paidTo} · {e.mode}</p>}
-            {e.receipt && <AttachmentThumb file={e.receipt} label="Payment proof" />}
+            <AttachmentList files={e.receipt} label="Payment proof" />
           </div>
         )}
       />
@@ -2007,7 +2080,7 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
                   </div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-lg font-semibold">{fmtINR(l.amount)}</div>
                   <p style={{ color: C.ink }} className="text-sm">{l.notes}</p>
-                  {l.proof && <AttachmentThumb file={l.proof} label="Proof" />}
+                  <AttachmentList files={l.proof} label="Proof" />
                 </div>
               )}
             />
