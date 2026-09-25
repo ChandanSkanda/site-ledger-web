@@ -16,5 +16,11 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      // Service worker: lets Android install Site Ledger as an app.
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").catch(function (e) { console.warn("Service worker not registered", e); });
+      }
+    </script>
   </body>
 </html>
