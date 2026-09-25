@@ -554,9 +554,12 @@ function CardActions({ onEdit, onDelete }) {
 /* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem, filter }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null); // item being edited
+  // Optional filter chips, e.g. filter={{ key: "category", options: [...], summary: (shown) => ... }}
+  const [filterVal, setFilterVal] = useState("All");
+  const shownItems = filter && filterVal !== "All" ? items.filter((i) => i[filter.key] === filterVal) : items;
   const [importMsg, setImportMsg] = useState("");
   const importRef = useRef();
 
@@ -654,13 +657,40 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
       {enableImportExport && importMsg && (
         <p style={{ color: C.concrete }} className="text-xs mb-3">{importMsg}</p>
       )}
+      {filter && items.length > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+          <div className="flex flex-wrap gap-2">
+            {["All", ...filter.options].map((opt) => {
+              const n = opt === "All" ? items.length : items.filter((i) => i[filter.key] === opt).length;
+              if (opt !== "All" && n === 0 && filterVal !== opt) return null;
+              const active = filterVal === opt;
+              return (
+                <button
+                  key={opt}
+                  onClick={() => setFilterVal(opt)}
+                  style={{
+                    background: active ? C.navy : C.card,
+                    color: active ? "#fff" : C.ink,
+                    border: `1px solid ${active ? C.navy : C.line}`,
+                    transition: "background 150ms, color 150ms",
+                  }}
+                  className="rounded-full px-3 py-1 text-xs font-semibold"
+                >
+                  {opt} <span style={{ fontFamily: "'IBM Plex Mono', monospace", opacity: 0.75 }}>{n}</span>
+                </button>
+              );
+            })}
+          </div>
+          {filter.summary && <div className="text-sm">{filter.summary(shownItems, filterVal)}</div>}
+        </div>
+      )}
       {items.length === 0 && (
         <p style={{ color: C.concrete }} className="text-sm italic">
           Nothing logged yet. Add your first entry.
         </p>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
-        {items.map((item) => (
+        {shownItems.map((item) => (
           <div
             key={item.id}
             style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }}
@@ -1800,9 +1830,10 @@ function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, d
 /* ---------------------------------------------------------------------- */
 /*  Budget / expenses / loan tab                                           */
 /* ---------------------------------------------------------------------- */
+const EXPENSE_CATEGORIES = ["Material", "Labor", "Builder Payment", "Permission / Govt Fee", "Professional Fee", "Transport", "Other"];
 const expenseSchema = [
   { key: "date", label: "Date", type: "date", required: true },
-  { key: "category", label: "Category", type: "select", options: ["Material", "Labor", "Builder Payment", "Permission / Govt Fee", "Professional Fee", "Transport", "Other"], required: true },
+  { key: "category", label: "Category", type: "select", options: EXPENSE_CATEGORIES, required: true },
   { key: "description", label: "Description", type: "text" },
   { key: "amount", label: "Amount (₹)", type: "number", required: true },
   { key: "paidTo", label: "Paid to", type: "text" },
@@ -2002,6 +2033,18 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
         items={expenses}
         setItems={setExpenses}
         storageKey="expenses"
+        filter={{
+          key: "category",
+          options: EXPENSE_CATEGORIES,
+          summary: (shown, val) => (
+            <span style={{ color: C.concrete }}>
+              {val === "All" ? "Total" : val}:{" "}
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="font-semibold">
+                {fmtINR(shown.reduce((sum, e) => sum + Number(e.amount || 0), 0))}
+              </span>
+            </span>
+          ),
+        }}
         addLabel="Add expense"
         renderCard={(e) => (
           <div>
