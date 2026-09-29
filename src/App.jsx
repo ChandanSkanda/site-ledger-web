@@ -10,7 +10,7 @@ import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
 import { ROLE_LABELS, ROLE_TAB_ACCESS, ALL_ROLES } from "./lib/roles";
 import { getActiveProjectId } from "./lib/activeProject";
-import { readWhatsAppExport, groupByDay } from "./lib/whatsapp";
+import { readWhatsAppExport, groupByDay, listDocuments, cleanDocName, deviceTimeZone, SITE_TIME_ZONE } from "./lib/whatsapp";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
 /* ---------------------------------------------------------------------- */
@@ -82,6 +82,52 @@ const STAGES = [
   "Roof / Slab", "Brickwork", "Electrical Rough-in", "Plumbing Rough-in",
   "Plastering", "Flooring", "Painting", "Finishing", "Other",
 ];
+
+// ---- Stages: built-in list + your own stages / mini projects (e.g. "Lift installation").
+// A stage counts as DONE when:
+//   • you ticked it (manual), or
+//   • AI marked it from the log ("Excavation work completed…"), or
+//   • a later stage in the main structural chain has already started
+//     (e.g. once Foundation work is logged, Excavation must be finished).
+// You can always override: tapping a chip forces it on/off, "Reset" hands it back to AI.
+const STRUCTURE_CHAIN = ["Demolition", "Excavation", "Foundation", "Plinth", "Superstructure", "Roof / Slab"];
+
+function getStages(meta) {
+  const base = STAGES.filter((s) => s !== "Other");
+  const custom = (meta?.customStages || []).filter((c) => c && !base.includes(c));
+  return [...base, ...custom, "Other"];
+}
+
+function stageState(meta, stage, loggedStages = new Set()) {
+  const manualOn = (meta?.completedStages || []).includes(stage);
+  const manualOff = (meta?.stageManualOff || []).includes(stage);
+  const auto = meta?.stageAuto?.[stage];
+  let implied = null;
+  const idx = STRUCTURE_CHAIN.indexOf(stage);
+  if (idx > -1) {
+    const later = STRUCTURE_CHAIN.slice(idx + 1).find((s) => loggedStages.has(s) || (meta?.completedStages || []).includes(s) || meta?.stageAuto?.[s]);
+    if (later) implied = later;
+  }
+  const aiDone = !!auto || !!implied;
+  const done = manualOn || (!manualOff && aiDone);
+  const how = manualOn ? "manual" : manualOff ? (aiDone ? "manual-off" : null) : auto ? "ai" : implied ? "implied" : null;
+  return { done, how, auto, implied, inProgress: !done && loggedStages.has(stage) };
+}
+
+function effectiveCompletedStages(meta, progress = []) {
+  const logged = new Set(progress.map((p) => p.stage));
+  return getStages(meta).filter((s) => s !== "Other" && stageState(meta, s, logged).done);
+}
+
+// "14 months", "420 days", "1.5 years" → number of days
+function periodToDays(text) {
+  const m = String(text || "").match(/(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mon|mths?|weeks?|wks?|days?)/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  const u = m[2].toLowerCase();
+  const mult = u.startsWith("y") ? 365 : u.startsWith("mo") || u.startsWith("mt") || u === "mon" ? 30.44 : u.startsWith("w") ? 7 : 1;
+  return Math.round(n * mult);
+}
 
 // Default builder payment schedule — pre-filled from the construction
 // agreement. Editable: amounts, milestone names, and rows can all be
@@ -729,8 +775,108 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
 /* ---------------------------------------------------------------------- */
 /*  Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
-function Dashboard({ data, setTab, currentUser, autoCheck = "" }) {
-  const { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan } = data;
+// ---- Project timeline: start date, days passed, days worked, agreed duration.
+function computeTimeline(meta, progress, agreement) {
+  const t = meta?.timeline || {};
+  const dated = progress.filter((p) => p.date).map((p) => p.date).sort();
+  const demo = progress.filter((p) => p.stage === "Demolition" && p.date).map((p) => p.date).sort();
+  const autoStart = demo[0] || dated[0] || "";
+  const start = t.startDate || autoStart;
+  const startSource = t.startDate ? "set by you" : demo[0] ? "first Demolition entry" : dated[0] ? "first log entry" : "";
+  const workedDates = new Set(progress.filter((p) => p.date && (!start || p.date >= start) && p.workersCount !== "0").map((p) => p.date));
+  const autoWorked = workedDates.size;
+  const worked = t.workingDays !== undefined && t.workingDays !== "" && t.workingDays !== null ? Number(t.workingDays) : autoWorked;
+  const agreedText = agreement?.builder?.completionPeriod || "";
+  const autoEstimate = periodToDays(agreedText);
+  const estimate = t.estimatedDays ? Number(t.estimatedDays) : autoEstimate;
+  const estimateSource = t.estimatedDays ? "set by you" : autoEstimate ? `agreement: “${agreedText}”` : "";
+  const todayD = new Date(today());
+  const startD = start ? new Date(start) : null;
+  const passed = startD ? Math.max(0, Math.round((todayD - startD) / 86400000) + 1) : null;
+  const due = startD && estimate ? new Date(startD.getTime() + estimate * 86400000) : null;
+  const remaining = due ? Math.round((due - todayD) / 86400000) : null;
+  return { start, startSource, autoStart, passed, worked, workedAuto: t.workingDays === undefined || t.workingDays === "" || t.workingDays === null, autoWorked, estimate, estimateSource, due, remaining };
+}
+
+function TimelineCard({ meta, setMeta, progress, agreement }) {
+  const [editing, setEditing] = useState(false);
+  const tl = computeTimeline(meta, progress, agreement);
+  const t = meta.timeline || {};
+  const [draft, setDraft] = useState({});
+  const aiPct = meta.planReview?.progressPct;
+  const timePct = tl.estimate && tl.passed ? Math.min(100, Math.round((tl.passed / tl.estimate) * 100)) : null;
+  const fmt = (d) => (d ? new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—");
+  const save = async () => {
+    const next = { ...meta, timeline: { startDate: draft.startDate || "", estimatedDays: draft.estimatedDays || "", workingDays: draft.workingDays === "" ? "" : draft.workingDays } };
+    setMeta(next);
+    await saveKey("meta", next);
+    setEditing(false);
+  };
+  const cell = (label, value, sub) => (
+    <div>
+      <div style={{ color: C.concrete }} className="text-[11px] uppercase font-semibold tracking-wide">{label}</div>
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.ink }} className="text-xl font-semibold">{value}</div>
+      {sub && <div style={{ color: C.concrete }} className="text-[11px]">{sub}</div>}
+    </div>
+  );
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-8">
+      <div className="flex items-start justify-between gap-2 flex-wrap mb-3">
+        <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide flex items-center gap-2">
+          <CalendarDays size={15} /> Project timeline
+        </h3>
+        <button onClick={() => { setDraft({ startDate: t.startDate || "", estimatedDays: t.estimatedDays || "", workingDays: t.workingDays ?? "" }); setEditing(true); }} style={{ color: C.navy }} className="text-xs underline flex items-center gap-1">
+          <Pencil size={12} /> Edit
+        </button>
+      </div>
+      {!tl.start ? (
+        <p style={{ color: C.concrete }} className="text-xs">No start date yet — it's picked automatically from the first Demolition log entry (or the first entry), or tap Edit to set it.</p>
+      ) : (
+        <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+          {cell("Started", fmt(tl.start), tl.startSource)}
+          {cell("Days since start", tl.passed ?? "—", "calendar days")}
+          {cell("Days worked on site", tl.worked, tl.workedAuto ? "days with a log entry" : "set by you")}
+          {cell("Agreed duration", tl.estimate ? `${tl.estimate} d` : "—", tl.estimate ? tl.estimateSource : "tap Edit, or read it from the agreement (Budget → Builder details)")}
+        </div>
+      )}
+      {tl.start && tl.estimate && (
+        <div className="mt-4">
+          <div className="flex items-center justify-between text-xs mb-1 flex-wrap gap-2" style={{ color: C.concrete }}>
+            <span>Expected completion: <b style={{ color: C.ink }}>{fmt(tl.due)}</b> {tl.remaining >= 0 ? `· ${tl.remaining} days left` : `· ${-tl.remaining} days overdue`}</span>
+            {timePct !== null && <span>Time used <b style={{ color: C.ink }}>{timePct}%</b>{aiPct !== null && aiPct !== undefined ? <> · work done <b style={{ color: C.ink }}>{aiPct}%</b> (AI)</> : null}</span>}
+          </div>
+          <div style={{ background: C.paperDark, height: 8 }} className="rounded-full overflow-hidden relative">
+            <div style={{ width: `${timePct || 0}%`, background: C.navyLight, height: "100%" }} />
+            {aiPct !== null && aiPct !== undefined && <div style={{ position: "absolute", top: 0, left: 0, width: `${aiPct}%`, height: "100%", background: aiPct + 5 < (timePct || 0) ? C.rust : C.green, opacity: 0.85 }} />}
+          </div>
+          {aiPct !== null && aiPct !== undefined && timePct !== null && (
+            <p className="text-xs mt-1" style={{ color: aiPct + 5 < timePct ? C.rust : C.green }}>
+              {aiPct + 5 < timePct ? "Work is behind the time used — worth asking the builder about the schedule." : "Work is keeping pace with the time used."}
+            </p>
+          )}
+        </div>
+      )}
+      {editing && (
+        <Modal title="Project timeline" onClose={() => setEditing(false)}>
+          <p style={{ color: C.concrete }} className="text-xs mb-3">Leave a box empty to let the app work it out automatically.</p>
+          <Field label={`Start date${tl.autoStart ? ` (auto: ${tl.autoStart})` : ""}`}>
+            <input style={inputStyle} type="date" value={draft.startDate} onChange={(e) => setDraft({ ...draft, startDate: e.target.value })} />
+          </Field>
+          <Field label={`Agreed duration in days${tl.estimateSource && !t.estimatedDays ? ` (auto: ${tl.estimate} from ${tl.estimateSource})` : ""}`}>
+            <input style={inputStyle} type="number" min="1" placeholder="e.g. 425 (14 months ≈ 426 days)" value={draft.estimatedDays} onChange={(e) => setDraft({ ...draft, estimatedDays: e.target.value })} />
+          </Field>
+          <Field label={`Days worked on site (auto: ${tl.autoWorked})`}>
+            <input style={inputStyle} type="number" min="0" placeholder="Leave empty to count from the log" value={draft.workingDays} onChange={(e) => setDraft({ ...draft, workingDays: e.target.value })} />
+          </Field>
+          <Btn onClick={save}><CheckCircle2 size={15} /> Save</Btn>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function Dashboard({ data, setTab, currentUser, autoCheck = "", setMeta }) {
+  const { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan, agreement } = data;
 
   const spentOnExpenses = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
   const spentOnPermissions = permissions.reduce((s, p) => s + Number(p.cost || 0), 0);
@@ -741,9 +887,9 @@ function Dashboard({ data, setTab, currentUser, autoCheck = "" }) {
   const openIssues = issues.filter((i) => i.status !== "Resolved").length;
   const latestStage = progress[0]?.stage || "Not started";
 
-  const stageOrder = STAGES.filter((s) => s !== "Other");
-  const completedStages = new Set(meta.completedStages || []);
+  const stageOrder = getStages(meta).filter((s) => s !== "Other");
   const loggedStages = new Set(progress.map((p) => p.stage));
+  const completedStages = new Set(stageOrder.filter((s) => stageState(meta, s, loggedStages).done));
 
   // Monthly spend (expenses only — permission fees aren't dated per month in a useful way here)
   const monthTotals = {};
@@ -792,6 +938,8 @@ function Dashboard({ data, setTab, currentUser, autoCheck = "" }) {
         {stat("Current stage", latestStage, C.navy, Hammer)}
         {stat("Open red flags", redFlags, redFlags ? C.red : C.green, AlertTriangle)}
       </div>
+
+      <TimelineCard meta={meta} setMeta={setMeta} progress={progress} agreement={agreement} />
 
       {/* AI progress assessment — from the latest plan cross-check (manual or weekly) */}
       {(meta.planReview || autoCheck || meta.planSchedule) && (() => {
@@ -981,7 +1129,7 @@ const PHOTO_SLOTS = [
 ];
 
 // Ask the AI to watch the entry and decide the flag. Returns { flag, reason }.
-async function reviewProgressEntry(entry, photos, { recent = [], planText = "", completedStages = [] } = {}) {
+async function reviewProgressEntry(entry, photos, { recent = [], planText = "", completedStages = [], stages = STAGES } = {}) {
   const imgs = PHOTO_SLOTS.filter((s) => photos?.[s.key]).map((s) => ({ data: photos[s.key], mimeType: "image/jpeg" }));
   const history = recent
     .slice(0, 10)
@@ -1011,13 +1159,18 @@ Look for: safety problems (no helmets, unsafe scaffolding, exposed rebar, open t
 
 Reply in exactly this format and nothing else:
 FLAG: NONE or WATCH or RED FLAG
-REASON: one or two short sentences a homeowner can understand. If NONE, say briefly what looks fine.`;
+REASON: one or two short sentences a homeowner can understand. If NONE, say briefly what looks fine.
+COMPLETED: stages this entry clearly says or shows are now FINISHED, comma-separated, chosen only from: ${stages.filter((x) => x !== "Other").join(", ")} — or NONE. Only list a stage if the notes say the WHOLE stage is completed/finished/done or the photos clearly show it finished. Ongoing work, a single activity within a stage (e.g. PCC, marking), or temporary works (labour shed, temporary power) do not count.`;
   const out = await askClaude({ text, images: imgs });
   const m = out.match(/FLAG:\s*(RED\s*FLAG|WATCH|NONE)/i);
-  const r = out.match(/REASON:\s*([\s\S]+)/i);
+  const r = out.match(/REASON:\s*([\s\S]+?)(?:\n\s*COMPLETED:|$)/i);
+  const cm = out.match(/COMPLETED:\s*(.+)/i);
+  const completed = cm && !/^none/i.test(cm[1].trim())
+    ? cm[1].split(/[,;]/).map((x) => x.trim()).map((x) => stages.find((st) => st.toLowerCase() === x.toLowerCase())).filter((x) => x && x !== "Other")
+    : [];
   const word = m ? m[1].toUpperCase().replace(/\s+/g, " ") : "WATCH";
   const flag = word === "RED FLAG" ? "Red Flag" : word === "WATCH" ? "Watch" : "None";
-  return { flag, reason: (r ? r[1] : out).trim().slice(0, 400) };
+  return { flag, reason: (r ? r[1] : out).trim().slice(0, 400), completed };
 }
 
 function PhotoPicker({ label, value, onChange }) {
@@ -1064,7 +1217,7 @@ function PhotoPicker({ label, value, onChange }) {
   );
 }
 
-function ProgressEntryForm({ onSave, initial }) {
+function ProgressEntryForm({ onSave, initial, stages = STAGES }) {
   const [vals, setVals] = useState({
     date: initial?.date || today(),
     stage: initial?.stage || "",
@@ -1097,7 +1250,7 @@ function ProgressEntryForm({ onSave, initial }) {
       <Field label="Stage">
         <select style={inputStyle} value={vals.stage} required onChange={(e) => set("stage", e.target.value)}>
           <option value="">Select…</option>
-          {STAGES.map((o) => <option key={o} value={o}>{o}</option>)}
+          {stages.map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       </Field>
       <Field label="Workers on site">
@@ -1442,7 +1595,7 @@ function sampleEvenly(list, n) {
   return [...out].sort((a, b) => a - b).slice(0, n);
 }
 
-async function summariseWhatsAppDay(day, thumbs, contacts = []) {
+async function summariseWhatsAppDay(day, thumbs, contacts = [], stages = STAGES) {
   // thumbs: [{ data, time, sender }] — small numbered previews of the day's photos
   const chat = day.messages
     .map((m) => `${m.time} ${senderLabel(m.sender, contacts)}: ${m.text || (m.photos.length ? `[${m.photos.length} photo${m.photos.length > 1 ? "s" : ""}]` : "")}`)
@@ -1457,11 +1610,13 @@ ${chat}
 ${thumbs.length ? `${thumbs.length} photo(s) from the day are attached in this order:\n${photoList}` : "No photos."}
 
 Turn this into ONE daily progress log entry AND choose which photos are worth keeping. Reply with ONLY a JSON object:
-{"relevant": true/false, "stage": "...", "description": "...", "workersCount": "", "start": null, "end": null, "keep": [], "skipped": ""}
+{"relevant": true/false, "stage": "...", "description": "...", "workersCount": "", "completed": [], "start": null, "end": null, "keep": [], "skipped": ""}
 - "relevant": false if the day has no real site progress (just greetings, "ok", payments chat etc.).
-- "stage": exactly one of: ${STAGES.join(", ")}.
+- "stage": exactly one of: ${stages.join(", ")}.
 - "description": 1-3 short sentences on what work happened and any instructions or issues raised (e.g. "Builder asked for caution tape"). Plain English, no names needed.
-- "workersCount": number of workers if stated or clearly countable in photos, else "".
+- "workersCount": total people working on site if stated — add up all trades (e.g. "Workers : 4 nos" → "4"; "Mason: 1, Helper: 1, Digital surveyor: 2" → "4") — or clearly countable in photos, else "".
+- "completed": stages the messages clearly say are FINISHED that day (e.g. "Excavation work completed" → ["Excavation"]), chosen only from the stage list; [] if none. Rules: ongoing work does not count; one activity inside a stage does not finish the whole stage (e.g. "PCC completed" or "footing marking done" do NOT finish Foundation); temporary works (labour shed, site office, temporary power/meter, water tank) never count as a house stage.
+- The site engineer often posts a "DAILY WORK REPORT" with Date, Workers and a numbered Work list — treat that as the main source for the day.
 - "start": the photo number that best shows the site at the START of the day's work (usually an early photo), or null if no useful photo.
 - "end": the photo number that best shows the RESULT at the end of the day (usually a late photo, different from start), or null if only one useful photo.
 - "keep": up to ${MAX_KEEP_EXTRA} OTHER photo numbers that add real information — a different area of work, a close-up of workmanship or material brands, a safety or quality problem, a delivery. Leave it empty if nothing adds value.
@@ -1476,20 +1631,37 @@ Turn this into ONE daily progress log entry AND choose which photos are worth ke
   const keep = [...new Set((Array.isArray(r.keep) ? r.keep : []).map(valid).filter((x) => x !== null && x !== start && x !== end))].slice(0, MAX_KEEP_EXTRA);
   return {
     relevant: r.relevant !== false,
-    stage: STAGES.includes(r.stage) ? r.stage : "Other",
+    stage: stages.includes(r.stage) ? r.stage : "Other",
     description: String(r.description || "").trim(),
     workersCount: r.workersCount ? String(r.workersCount).replace(/[^0-9]/g, "") : "",
+    completed: (Array.isArray(r.completed) ? r.completed : []).map((x) => stages.find((st) => st.toLowerCase() === String(x).toLowerCase())).filter((x) => x && x !== "Other"),
     pick: { start, end, keep },
     skipped: String(r.skipped || "").trim(),
   };
 }
 
-function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
+// Guess a document type from its file name (you can change it before importing).
+function guessDocType(name) {
+  const n = name.toLowerCase();
+  if (/agreement|contract|mou/.test(n)) return "Agreement";
+  if (/plan|drawing|elevation|layout|design|section|schedule|marking|footing|column|beam|slab|\.dwg$|structural|3d/.test(n)) return "Design";
+  if (/receipt|paid|payment/.test(n)) return "Receipt";
+  if (/bill|invoice|quotation|quote|estimate|boq/.test(n)) return "Bill";
+  return "Other";
+}
+const DOC_SIZE_LIMIT = 8 * 1024 * 1024; // bigger files are skipped (too large to store here)
+
+function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages = STAGES, documents = [], lastImport, onUndo }) {
   const fileRef = useRef();
   const stopRef = useRef(false);
   const [step, setStep] = useState(null); // null | "choose" | "reading" | "review"
   const [error, setError] = useState("");
-  const [data, setData] = useState(null); // { days, senders, getPhoto, hasMedia }
+  const [data, setData] = useState(null); // { days, senders, getPhoto, getFile, hasMedia, docs }
+  const [pickedDocs, setPickedDocs] = useState({}); // name -> { include, type, title }
+  const [sourceFile, setSourceFile] = useState(null);
+  const tz = deviceTimeZone();
+  const needsTz = tz && tz !== SITE_TIME_ZONE;
+  const [toIndiaTime, setToIndiaTime] = useState(true);
   const [pickedSenders, setPickedSenders] = useState({});
   const [pickedDays, setPickedDays] = useState({});
   const [status, setStatus] = useState("");
@@ -1504,15 +1676,31 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
     const file = e.target.files[0];
     e.target.value = "";
     if (!file) return;
+    setSourceFile(file);
+    await loadExport(file, toIndiaTime);
+  };
+  const loadExport = async (file, convert) => {
     setError("");
     try {
-      const res = await readWhatsAppExport(file);
+      const res = await readWhatsAppExport(file, { convertToSiteTime: convert });
       if (!res.messages.length) throw new Error("No messages found in that file.");
       const days = groupByDay(res.messages);
       const counts = {};
       res.messages.forEach((m) => { counts[m.sender] = (counts[m.sender] || 0) + 1; });
       const senders = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-      setData({ days, senders, getPhoto: res.getPhoto, hasMedia: res.hasMedia });
+      const existingNames = new Set(documents.map((d) => cleanDocName(d.attachment?.name).toLowerCase()).filter(Boolean));
+      const docs = listDocuments(res.messages).map((d) => ({
+        ...d,
+        inZip: res.hasFile ? res.hasFile(d.name) : false,
+        size: res.fileSize ? res.fileSize(d.name) : 0,
+        already: existingNames.has(d.clean.toLowerCase()),
+      }));
+      setPickedDocs(Object.fromEntries(docs.map((d) => [d.name, {
+        include: d.inZip && !d.already && !(d.size > DOC_SIZE_LIMIT),
+        type: guessDocType(d.clean),
+        title: d.clean.replace(/\.[a-z0-9]+$/i, ""),
+      }])));
+      setData({ days, senders, getPhoto: res.getPhoto, getFile: res.getFile, hasMedia: res.hasMedia, docs });
       setPickedSenders(Object.fromEntries(senders.map(([n]) => [n, true])));
       setPickedDays(Object.fromEntries(days.map((d) => [d.date, !importedDates.has(d.date)])));
       setStep("choose");
@@ -1557,7 +1745,7 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
       if (thumbs.length) setStatus(`Reading ${day.date} (${i + 1} of ${days.length}) — AI is sorting ${all.length} photo${all.length > 1 ? "s" : ""}…`);
       let summary;
       try {
-        summary = await summariseWhatsAppDay(day, thumbs, contacts);
+        summary = await summariseWhatsAppDay(day, thumbs, contacts, stages);
       } catch (err) {
         const busy = /high demand|overloaded|try again later|\(429\)|\(503\)/i.test(err?.message || "");
         summary = {
@@ -1588,9 +1776,28 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
     setStep("review");
   };
 
+  const selectedDocs = () => (data?.docs || []).filter((d) => pickedDocs[d.name]?.include);
+  const readDocs = async () => {
+    const out = [];
+    for (const d of selectedDocs()) {
+      const blob = await data.getFile(d.name);
+      if (!blob) continue;
+      const b64 = await fileToBase64(blob);
+      out.push({ ...d, ...pickedDocs[d.name], attachment: { name: d.clean, mimeType: blob.type, data: b64 } });
+    }
+    return out;
+  };
   const doImport = async () => {
     setImporting(true);
-    await onImport(drafts.filter((d) => d.include), runChecks);
+    const docs = await readDocs();
+    await onImport(drafts.filter((d) => d.include), runChecks, docs);
+    setImporting(false);
+    close();
+  };
+  const importDocsOnly = async () => {
+    setImporting(true);
+    const docs = await readDocs();
+    await onImport([], false, docs);
     setImporting(false);
     close();
   };
@@ -1610,17 +1817,36 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
             In the site WhatsApp group: ⋮ → More → <b>Export chat</b> → <b>Include media</b>, then upload the zip here. AI turns each day's messages and photos into a daily log entry for you to review. Days already imported are skipped.
           </p>
         </div>
-        <input type="file" accept=".zip,.txt,application/zip,text/plain" ref={fileRef} className="hidden" onChange={onPick} />
-        <Btn tone="ghost" small onClick={() => fileRef.current.click()}>
-          <Upload size={14} /> Upload chat export
-        </Btn>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input type="file" accept=".zip,.txt,application/zip,text/plain" ref={fileRef} className="hidden" onChange={onPick} />
+          <Btn tone="ghost" small onClick={() => fileRef.current.click()}>
+            <Upload size={14} /> Upload chat export
+          </Btn>
+        </div>
       </div>
+      {lastImport && (lastImport.entryIds?.length || lastImport.docIds?.length) ? (
+        <p style={{ color: C.concrete }} className="text-xs mt-2">
+          Last import: {new Date(lastImport.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} — {lastImport.entryIds?.length || 0} log entries, {lastImport.docIds?.length || 0} documents.{" "}
+          <button onClick={onUndo} style={{ color: C.red }} className="underline">Undo last import</button>
+        </p>
+      ) : null}
       {error && <p style={{ color: C.red }} className="text-xs mt-2">{error}</p>}
 
       {step && (
         <Modal title="Import from WhatsApp" onClose={close} size="large">
           {step === "choose" && data && (
             <div>
+              {needsTz && (
+                <label className="flex items-start gap-2 text-xs mb-3" style={{ color: C.ink }}>
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={toIndiaTime}
+                    onChange={(e) => { setToIndiaTime(e.target.checked); if (sourceFile) loadExport(sourceFile, e.target.checked); }}
+                  />
+                  <span>Convert message times from your phone's time zone (<b>{tz}</b>) to <b>India time</b>, so each update lands on the right site day. Keep this on unless the chat was exported from a phone set to India time.</span>
+                </label>
+              )}
               {!data.hasMedia && (
                 <p style={{ color: C.yellow }} className="text-xs mb-3">No photos in this export — choose “Include media” when exporting to bring the photos in too.</p>
               )}
@@ -1677,9 +1903,43 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
                   );
                 })}
               </div>
-              <Btn onClick={readDays} disabled={!selectedCount}>
-                <Sparkles size={15} /> Read {selectedCount} {selectedCount === 1 ? "day" : "days"} with AI
-              </Btn>
+              {data.docs.length > 0 && (
+                <div className="mb-4">
+                  <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mb-1">Documents shared in the chat ({data.docs.length})</div>
+                  <p style={{ color: C.concrete }} className="text-xs mb-2">Ticked ones are saved to <b>Documents</b>. Ones you already have (same file name) are unticked.</p>
+                  <div className="space-y-1.5" style={{ maxHeight: 220, overflowY: "auto" }}>
+                    {data.docs.map((d) => {
+                      const pd = pickedDocs[d.name] || {};
+                      const tooBig = d.size > DOC_SIZE_LIMIT;
+                      return (
+                        <div key={d.name + d.date + d.time} style={{ background: "#fff", border: `1px solid ${C.line}`, opacity: pd.include ? 1 : 0.7 }} className="rounded-md px-3 py-2 text-xs flex items-center gap-2 flex-wrap">
+                          <input type="checkbox" disabled={!d.inZip || tooBig} checked={!!pd.include} onChange={(e) => setPickedDocs({ ...pickedDocs, [d.name]: { ...pd, include: e.target.checked } })} />
+                          <FileText size={13} style={{ color: C.navy }} />
+                          <input style={{ ...inputStyle, width: 260, padding: "3px 6px", fontSize: 12 }} value={pd.title || ""} onChange={(e) => setPickedDocs({ ...pickedDocs, [d.name]: { ...pd, title: e.target.value } })} />
+                          <select style={{ ...inputStyle, width: "auto", padding: "3px 6px", fontSize: 12 }} value={pd.type} onChange={(e) => setPickedDocs({ ...pickedDocs, [d.name]: { ...pd, type: e.target.value } })}>
+                            {DOCUMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                          <span style={{ color: C.concrete }}>{d.date} · {d.sender}</span>
+                          {d.already && <span style={{ color: C.green }} className="font-semibold">already in Documents</span>}
+                          {!d.inZip && <span style={{ color: C.yellow }}>not in this export (export “with media”)</span>}
+                          {tooBig && <span style={{ color: C.yellow }}>too large ({Math.round(d.size / 1048576)} MB) — upload it manually</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="flex items-center gap-3 flex-wrap">
+                <Btn onClick={readDays} disabled={!selectedCount}>
+                  <Sparkles size={15} /> Read {selectedCount} {selectedCount === 1 ? "day" : "days"} with AI
+                </Btn>
+                {selectedDocs().length > 0 && (
+                  <Btn tone="ghost" onClick={importDocsOnly} disabled={importing}>
+                    {importing ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Save {selectedDocs().length} {selectedDocs().length === 1 ? "document" : "documents"} only
+                  </Btn>
+                )}
+              </div>
+              <p style={{ color: C.concrete }} className="text-xs mt-2">Nothing is saved until you press Import at the end — you can close this window at any time.</p>
               {selectedCount > 15 && <p style={{ color: C.concrete }} className="text-xs mt-2">Tip: many days can take a few minutes. You can review what's done so far at any time.</p>}
             </div>
           )}
@@ -1716,12 +1976,18 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
                       </div>
                       <div className="flex-1 min-w-[220px] grid gap-2 sm:grid-cols-3">
                         <select style={{ ...inputStyle, padding: "6px 8px", fontSize: 13 }} value={d.stage} onChange={(e) => setDraft(idx, { stage: e.target.value })}>
-                          {STAGES.map((o) => <option key={o} value={o}>{o}</option>)}
+                          {stages.map((o) => <option key={o} value={o}>{o}</option>)}
                         </select>
                         <input style={{ ...inputStyle, padding: "6px 8px", fontSize: 13 }} type="number" min="0" placeholder="Workers" value={d.workersCount} onChange={(e) => setDraft(idx, { workersCount: e.target.value })} />
                         <span style={{ color: C.concrete }} className="text-xs self-center">{d.messageCount} messages{!d.relevant ? " · looks like chat only" : ""}</span>
                         {d.reportedBy && <span style={{ color: C.concrete }} className="text-xs sm:col-span-3">From: {d.reportedBy}</span>}
                         {d.photoNote && <span style={{ color: C.concrete }} className="text-xs sm:col-span-3 flex items-center gap-1"><Camera size={11} /> {d.photoNote}</span>}
+                        {d.completed?.length > 0 && (
+                          <span className="text-xs sm:col-span-3 flex items-center gap-1 flex-wrap" style={{ color: C.green }}>
+                            <CheckCircle2 size={11} /> Marks as finished: {d.completed.join(", ")}
+                            <button onClick={() => setDraft(idx, { completed: [] })} style={{ color: C.concrete }} className="underline ml-1">don't</button>
+                          </span>
+                        )}
                         <textarea style={{ ...inputStyle, minHeight: 54, fontSize: 13 }} className="sm:col-span-3" value={d.description} onChange={(e) => setDraft(idx, { description: e.target.value })} />
                       </div>
                     </div>
@@ -1731,7 +1997,8 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
               </div>
               {step === "review" && (
                 <div className="flex items-center gap-4 flex-wrap">
-                  <Btn onClick={doImport} disabled={importing || !drafts.some((d) => d.include)}>
+                  {selectedDocs().length > 0 && <span style={{ color: C.concrete }} className="text-xs w-full">Also saving {selectedDocs().length} document(s) to Documents.</span>}
+                  <Btn onClick={doImport} disabled={importing || (!drafts.some((d) => d.include) && !selectedDocs().length)}>
                     {importing ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
                     Import {drafts.filter((d) => d.include).length} {drafts.filter((d) => d.include).length === 1 ? "entry" : "entries"}
                   </Btn>
@@ -1827,7 +2094,7 @@ async function runPlanCrossCheck({ meta, progress, onStep = () => {} }) {
 
 ${attachList}
 
-Stages marked complete by the homeowner: ${(meta.completedStages || []).join(", ") || "none"}
+Stages marked complete: ${effectiveCompletedStages(meta, progress).join(", ") || "none"}
 ${meta.planText ? `Extra plan notes from the homeowner: ${meta.planText}\n` : ""}Today's date: ${today()}
 
 Full daily progress log (oldest first):
@@ -1886,20 +2153,33 @@ function nextPlanCheckLabel(meta) {
   return next.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
 }
 
-function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setContacts }) {
+function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setContacts, documents = [], setDocuments, currentUser }) {
   const [planFile, setPlanFile] = useState(meta.planFile || null);
   const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkStep, setCheckStep] = useState("");
   const [checkError, setCheckError] = useState("");
   const planFileRef = useRef();
-  const completedStages = new Set(meta.completedStages || []);
   const loggedStages = new Set(progress.map((p) => p.stage));
+  const stages = getStages(meta);
 
   // Always points at the latest list, so an AI review that finishes later
   // doesn't overwrite entries added or removed in the meantime.
   const progressRef = useRef(progress);
   progressRef.current = progress;
+
+  // Latest meta for async work (AI reviews finish later and must not
+  // overwrite changes made in the meantime).
+  const metaRef = useRef(meta);
+  metaRef.current = meta;
+  const patchMeta = async (fn) => {
+    const next = fn(metaRef.current);
+    metaRef.current = next;
+    setMeta(next);
+    await saveKey("meta", next);
+    return next;
+  };
+
 
   const patchEntry = async (id, patch) => {
     const next = progressRef.current.map((p) => (p.id === id ? { ...p, ...patch } : p));
@@ -1912,12 +2192,14 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
     await patchEntry(entry.id, { flag: "Checking" });
     try {
       const pics = photos || (entry.photoSlots?.length ? await loadKey(progressPhotoKey(entry.id), null) : null);
-      const { flag, reason } = await reviewProgressEntry(entry, pics, {
+      const { flag, reason, completed } = await reviewProgressEntry(entry, pics, {
         recent: progressRef.current.filter((p) => p.id !== entry.id),
-        planText: meta.planText,
-        completedStages: meta.completedStages || [],
+        planText: metaRef.current.planText,
+        completedStages: effectiveCompletedStages(metaRef.current, progressRef.current),
+        stages: getStages(metaRef.current),
       });
       await patchEntry(entry.id, { flag, flagReason: reason });
+      if (completed?.length) await markStagesAuto(completed, entry.date, { evidence: (entry.description || "").slice(0, 80), entryId: entry.id, importId: entry.importId });
     } catch (e) {
       console.error("[SiteLedger] AI review failed", e);
       await patchEntry(entry.id, { flag: entry.flag === "Checking" ? "" : entry.flag || "", flagReason: entry.flagReason || "" });
@@ -1936,24 +2218,73 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
 
   // Adds entries built from a WhatsApp export, newest first, then (optionally)
   // runs the usual AI flag check on each one in the background.
-  const importFromWhatsApp = async (drafts, runChecks) => {
+  const importFromWhatsApp = async (drafts, runChecks, docs = []) => {
+    const importId = uid();
     const entries = [];
     for (const d of drafts) {
       const id = uid();
       const photoSlots = PHOTO_SLOTS.filter((s) => d.photos[s.key]).map((s) => s.key);
       const extraCount = (d.photos.extra || []).length;
       if (photoSlots.length || extraCount) await saveKey(progressPhotoKey(id), d.photos);
-      entries.push({ id, date: d.date, extraCount, stage: d.stage, workersCount: d.workersCount, description: d.description, photoSlots, flag: runChecks ? "Checking" : "", flagReason: "", source: "whatsapp", reportedBy: d.reportedBy || "" });
+      entries.push({ id, importId, date: d.date, extraCount, stage: d.stage, workersCount: d.workersCount, description: d.description, photoSlots, flag: runChecks ? "Checking" : "", flagReason: "", source: "whatsapp", reportedBy: d.reportedBy || "" });
     }
-    const next = [...entries, ...progressRef.current].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-    progressRef.current = next;
-    setProgress(next);
-    await saveKey("progress", next);
+    if (entries.length) {
+      const next = [...entries, ...progressRef.current].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      progressRef.current = next;
+      setProgress(next);
+      await saveKey("progress", next);
+    }
+
+    // Documents shared in the chat → Documents tab.
+    const newDocs = docs.map((d) => ({
+      id: uid(), importId, title: d.title || d.name, type: d.type || "Other", date: d.date, amount: "",
+      attachment: d.attachment, notes: `From WhatsApp — shared by ${d.sender}${d.caption ? `: "${d.caption.slice(0, 120)}"` : ""}`,
+      uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", source: "whatsapp",
+    }));
+    if (newDocs.length && setDocuments) {
+      const nextDocs = [...newDocs, ...documents];
+      setDocuments(nextDocs);
+      await saveKey("documents", nextDocs);
+    }
+
+    // Stages the chat says were finished.
+    for (const d of drafts) {
+      if (d.completed?.length) await markStagesAuto(d.completed, d.date, { evidence: (d.description || "").slice(0, 80), importId });
+    }
+    await patchMeta((m) => ({ ...m, lastImport: { id: importId, at: new Date().toISOString(), entryIds: entries.map((e) => e.id), docIds: newDocs.map((d) => d.id) } }));
+
     if (runChecks) {
       for (const e of entries) {
         await runReview(e, drafts.find((d) => d.date === e.date)?.photos);
       }
     }
+  };
+
+  // Removes everything the last WhatsApp import added (entries, their photos,
+  // documents and the stage ticks it made).
+  const undoLastImport = async () => {
+    const li = metaRef.current.lastImport;
+    if (!li) return;
+    if (!window.confirm(`Undo the last WhatsApp import? This removes ${li.entryIds?.length || 0} log entries and ${li.docIds?.length || 0} documents it added.`)) return;
+    const ids = new Set(li.entryIds || []);
+    for (const e of progressRef.current.filter((x) => ids.has(x.id))) {
+      if (e.photoSlots?.length || e.extraCount) await saveKey(progressPhotoKey(e.id), null);
+    }
+    const next = progressRef.current.filter((x) => !ids.has(x.id));
+    progressRef.current = next;
+    setProgress(next);
+    await saveKey("progress", next);
+    if (li.docIds?.length && setDocuments) {
+      const dIds = new Set(li.docIds);
+      const nextDocs = documents.filter((d) => !dIds.has(d.id));
+      setDocuments(nextDocs);
+      await saveKey("documents", nextDocs);
+    }
+    await patchMeta((m) => {
+      const auto = { ...(m.stageAuto || {}) };
+      Object.keys(auto).forEach((k) => { if (auto[k]?.importId === li.id) delete auto[k]; });
+      return { ...m, stageAuto: auto, lastImport: null };
+    });
   };
 
   const saveEdit = (initial, updateItem) => async (vals, photos) => {
@@ -1990,13 +2321,41 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
     await saveKey("meta", next);
   };
 
-  const toggleStageComplete = async (stage) => {
-    const current = new Set(meta.completedStages || []);
-    if (current.has(stage)) current.delete(stage);
-    else current.add(stage);
-    const next = { ...meta, completedStages: Array.from(current) };
-    setMeta(next);
-    await saveKey("meta", next);
+  // Tap a stage: force it done / not done, overriding the AI.
+  const toggleStageComplete = (stage) =>
+    patchMeta((m) => {
+      const st = stageState(m, stage, loggedStages);
+      const on = new Set(m.completedStages || []);
+      const off = new Set(m.stageManualOff || []);
+      if (st.done) { on.delete(stage); off.add(stage); } else { on.add(stage); off.delete(stage); }
+      return { ...m, completedStages: [...on], stageManualOff: [...off] };
+    });
+  const resetStageToAuto = (stage) =>
+    patchMeta((m) => ({
+      ...m,
+      completedStages: (m.completedStages || []).filter((x) => x !== stage),
+      stageManualOff: (m.stageManualOff || []).filter((x) => x !== stage),
+    }));
+  const [newStage, setNewStage] = useState("");
+  const addCustomStage = async () => {
+    const name = newStage.trim();
+    if (!name || getStages(metaRef.current).some((x) => x.toLowerCase() === name.toLowerCase())) { setNewStage(""); return; }
+    await patchMeta((m) => ({ ...m, customStages: [...(m.customStages || []), name] }));
+    setNewStage("");
+  };
+  const removeCustomStage = (name) => {
+    if (!window.confirm(`Remove the stage "${name}"? Log entries already using it are kept.`)) return;
+    patchMeta((m) => ({ ...m, customStages: (m.customStages || []).filter((x) => x !== name) }));
+  };
+  // AI said these stages are finished (from a log entry or WhatsApp import).
+  const markStagesAuto = (stages, date, extra = {}) => {
+    const valid = (stages || []).filter((x) => getStages(metaRef.current).includes(x) && x !== "Other");
+    if (!valid.length) return;
+    return patchMeta((m) => {
+      const auto = { ...(m.stageAuto || {}) };
+      valid.forEach((x) => { if (!auto[x] || (date && date < auto[x].date)) auto[x] = { date, ...extra }; });
+      return { ...m, stageAuto: auto };
+    });
   };
 
   const crossCheck = async () => {
@@ -2032,28 +2391,54 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
           Stage completion
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-3">
-          Logging progress on a stage doesn't mark it done by itself — a stage can take several visits. Tick it off here once it's actually finished; that's what fills in green on the dashboard.
+          Stages tick themselves off automatically: when a log entry or WhatsApp update says a stage is finished (<b>AI</b>), or when the next structural stage has started (<b>auto</b>). Tap a stage to override it yourself; “reset” hands it back to AI.
         </p>
         <div className="flex flex-wrap gap-2">
-          {STAGES.filter((s) => s !== "Other").map((s) => {
-            const done = completedStages.has(s);
-            const inProgress = !done && loggedStages.has(s);
+          {getStages(meta).filter((x) => x !== "Other").map((x) => {
+            const st = stageState(meta, x, loggedStages);
+            const custom = (meta.customStages || []).includes(x);
+            const tag = st.how === "ai" ? "AI" : st.how === "implied" ? "auto" : null;
+            const title = st.how === "ai" ? `Marked done by AI${st.auto?.date ? ` on ${st.auto.date}` : ""}${st.auto?.evidence ? ` — "${st.auto.evidence}"` : ""}. Tap to override.`
+              : st.how === "implied" ? `Done automatically because ${st.implied} has started. Tap to override.`
+              : st.how === "manual" ? "You marked this done. Tap to undo."
+              : st.how === "manual-off" ? "You marked this NOT done (overriding AI). Tap to mark done."
+              : "Tap to mark done.";
             return (
-              <button
-                key={s}
-                onClick={() => toggleStageComplete(s)}
-                style={{
-                  border: `1.5px solid ${done ? C.green : inProgress ? C.rust : C.line}`,
-                  background: done ? C.green : "#fff",
-                  color: done ? "#fff" : C.ink,
-                }}
-                className="text-xs font-semibold px-3 py-1.5 rounded-full flex items-center gap-1.5"
-              >
-                {done && <CheckCircle2 size={13} />}
-                {s}
-              </button>
+              <span key={x} className="inline-flex items-center">
+                <button
+                  onClick={() => toggleStageComplete(x)}
+                  title={title}
+                  style={{
+                    border: `1.5px ${st.how === "manual-off" ? "dashed" : "solid"} ${st.done ? C.green : st.inProgress ? C.rust : C.line}`,
+                    background: st.done ? C.green : "#fff",
+                    color: st.done ? "#fff" : C.ink,
+                  }}
+                  className="text-xs font-semibold px-3 py-1.5 rounded-full flex items-center gap-1.5"
+                >
+                  {st.done && <CheckCircle2 size={13} />}
+                  {x}
+                  {tag && <span style={{ background: "rgba(255,255,255,0.25)" }} className="text-[9px] uppercase px-1 rounded">{tag}</span>}
+                  {st.how === "manual-off" && <span style={{ color: C.concrete }} className="text-[9px] uppercase">not done</span>}
+                </button>
+                {(st.how === "manual-off" || (st.how === "manual" && (st.auto || st.implied))) && (
+                  <button onClick={() => resetStageToAuto(x)} style={{ color: C.navy }} className="text-[10px] underline ml-1">reset</button>
+                )}
+                {custom && (
+                  <button onClick={() => removeCustomStage(x)} title="Remove this stage" style={{ color: C.concrete }} className="ml-0.5 hover:text-red-600"><X size={12} /></button>
+                )}
+              </span>
             );
           })}
+        </div>
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <input
+            style={{ ...inputStyle, width: 260, padding: "6px 10px", fontSize: 13 }}
+            placeholder="Add a stage or mini project, e.g. Lift installation"
+            value={newStage}
+            onChange={(e) => setNewStage(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addCustomStage()}
+          />
+          <Btn small tone="ghost" onClick={addCustomStage} disabled={!newStage.trim()}><Plus size={13} /> Add stage</Btn>
         </div>
       </div>
 
@@ -2115,7 +2500,10 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
         {meta.planReview && <PlanReport report={meta.planReview} />}
       </div>
 
-      <WhatsAppImport progress={progress} onImport={importFromWhatsApp} contacts={contacts} setContacts={setContacts} />
+      <WhatsAppImport
+        progress={progress} onImport={importFromWhatsApp} contacts={contacts} setContacts={setContacts}
+        stages={stages} documents={documents} lastImport={meta.lastImport} onUndo={undoLastImport}
+      />
 
       <ListSection
         icon={Hammer}
@@ -2130,8 +2518,8 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
         exportFileName="daily-progress-log"
         renderForm={({ addItem, updateItem, initial }) =>
           initial
-            ? <ProgressEntryForm key={initial.id} initial={initial} onSave={saveEdit(initial, updateItem)} />
-            : <ProgressEntryForm onSave={saveEntry(addItem)} />}
+            ? <ProgressEntryForm key={initial.id} initial={initial} stages={stages} onSave={saveEdit(initial, updateItem)} />
+            : <ProgressEntryForm stages={stages} onSave={saveEntry(addItem)} />}
         onRemoveItem={(item) => item.photoSlots?.length && saveKey(progressPhotoKey(item.id), null)}
         renderCard={(p) => <ProgressCard entry={p} onRecheck={runReview} />}
       />
@@ -2397,6 +2785,7 @@ const BUILDER_FIELDS = [
   { key: "pan", label: "PAN" },
   { key: "agreementDate", label: "Agreement date" },
   { key: "contractValue", label: "Contract value (as written)" },
+  { key: "completionPeriod", label: "Completion period (as written, e.g. 14 months)" },
 ];
 
 // Pull the first {...} block out of an AI reply and parse it.
@@ -2429,9 +2818,9 @@ Reply with ONLY a JSON object, no other text, using exactly these keys:
 {
   "companyName": "", "contactPerson": "", "phone": "", "email": "", "address": "",
   "gstin": "", "registrationNo": "", "licenseNo": "", "pan": "",
-  "agreementDate": "", "contractValue": ""
+  "agreementDate": "", "contractValue": "", "completionPeriod": ""
 }
-Rules: copy values exactly as written in the document; use "" for anything not present — never guess. "registrationNo" is a company/firm registration such as CIN or partnership registration. "licenseNo" is a contractor licence or RERA number. "contractValue" is the total contract amount as written.`;
+Rules: copy values exactly as written in the document; use "" for anything not present — never guess. "registrationNo" is a company/firm registration such as CIN or partnership registration. "licenseNo" is a contractor licence or RERA number. "contractValue" is the total contract amount as written. "completionPeriod" is the promised construction duration / completion time as written (e.g. "14 months from start of work"), or "" if not stated.`;
   const out = await askClaude({ text, images });
   const raw = parseJsonLoose(out);
   const clean = {};
@@ -3574,7 +3963,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
     );
   }
 
-  const data = { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan };
+  const data = { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan, agreement };
   const canSee = (tabKey) => (ROLE_TAB_ACCESS[currentUser?.role] || ROLE_TAB_ACCESS.other).includes(tabKey);
 
   return (
@@ -3641,8 +4030,13 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6">
-        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} autoCheck={autoCheck} />}
-        {tab === "progress" && <ProgressTab progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta} contacts={contacts} setContacts={setContacts} />}
+        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} autoCheck={autoCheck} setMeta={setMeta} />}
+        {tab === "progress" && (
+          <ProgressTab
+            progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta}
+            contacts={contacts} setContacts={setContacts} documents={documents} setDocuments={setDocuments} currentUser={currentUser}
+          />
+        )}
         {tab === "gallery" && (
           <GalleryTab
             gallery={gallery} setGallery={setGallery}
