@@ -4,7 +4,7 @@ import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
-  Upload, Download, Paperclip, Pencil, MapPin,
+  Upload, Download, Paperclip, Pencil, MapPin, RotateCcw, ArrowUp, ArrowDown, ListOrdered,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -95,7 +95,11 @@ const STRUCTURE_CHAIN = ["Demolition", "Excavation", "Foundation", "Plinth", "Su
 function getStages(meta) {
   const base = STAGES.filter((s) => s !== "Other");
   const custom = (meta?.customStages || []).filter((c) => c && !base.includes(c));
-  return [...base, ...custom, "Other"];
+  const all = [...base, ...custom];
+  // Your own order (Reorder stages), with any stage not in it kept at the end.
+  const order = (meta?.stageOrder || []).filter((x) => all.includes(x));
+  const ordered = [...order, ...all.filter((x) => !order.includes(x))];
+  return [...ordered, "Other"];
 }
 
 function stageState(meta, stage, loggedStages = new Set()) {
@@ -118,6 +122,11 @@ function effectiveCompletedStages(meta, progress = []) {
   const logged = new Set(progress.map((p) => p.stage));
   return getStages(meta).filter((s) => s !== "Other" && stageState(meta, s, logged).done);
 }
+
+// A plain "2026-10-25" must be shown as that calendar day in any time zone
+// (new Date("2026-10-25") is midnight UTC, i.e. the day before in the US).
+const localDay = (ymd) => new Date(`${String(ymd).slice(0, 10)}T00:00:00`);
+const fmtDay = (ymd, opts = { day: "numeric", month: "short", year: "numeric" }) => (ymd ? localDay(ymd).toLocaleDateString(undefined, opts) : "—");
 
 // "14 months", "420 days", "1.5 years" → number of days
 function periodToDays(text) {
@@ -609,12 +618,17 @@ function CardActions({ onEdit, onDelete }) {
 /* ---------------------------------------------------------------------- */
 /*  Generic list section (CRUD)                                            */
 /* ---------------------------------------------------------------------- */
-function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem, filter }) {
+function ListSection({ icon, title, subtitle, schema, items, setItems, storageKey, onPersist, renderCard, addLabel = "Add entry", enableImportExport = false, exportFileName, renderForm, onRemoveItem, filter, extraFilter, toolbar, filterKey = "", pageSize = 0, emptyFilteredText }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null); // item being edited
   // Optional filter chips, e.g. filter={{ key: "category", options: [...], summary: (shown) => ... }}
   const [filterVal, setFilterVal] = useState("All");
-  const shownItems = filter && filterVal !== "All" ? items.filter((i) => i[filter.key] === filterVal) : items;
+  const baseItems = extraFilter ? items.filter(extraFilter) : items; // e.g. Progress date/stage search
+  const shownItems = filter && filterVal !== "All" ? baseItems.filter((i) => i[filter.key] === filterVal) : baseItems;
+  // Long lists show a page at a time (keeps phones fast after months of entries).
+  const [limit, setLimit] = useState(pageSize || Infinity);
+  useEffect(() => { setLimit(pageSize || Infinity); }, [filterKey, pageSize]);
+  const pagedItems = shownItems.slice(0, limit);
   const [importMsg, setImportMsg] = useState("");
   const importRef = useRef();
 
@@ -739,13 +753,17 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
           {filter.summary && <div className="text-sm">{filter.summary(shownItems, filterVal)}</div>}
         </div>
       )}
+      {toolbar}
       {items.length === 0 && (
         <p style={{ color: C.concrete }} className="text-sm italic">
           Nothing logged yet. Add your first entry.
         </p>
       )}
+      {items.length > 0 && shownItems.length === 0 && (
+        <p style={{ color: C.concrete }} className="text-sm italic">{emptyFilteredText || "Nothing matches this filter."}</p>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
-        {shownItems.map((item) => (
+        {pagedItems.map((item) => (
           <div
             key={item.id}
             style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)", transition: "box-shadow 150ms, transform 150ms" }}
@@ -756,6 +774,13 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
           </div>
         ))}
       </div>
+      {shownItems.length > pagedItems.length && (
+        <div className="mt-4 flex justify-center">
+          <Btn tone="ghost" small onClick={() => setLimit((l) => l + (pageSize || 20))}>
+            Show more ({shownItems.length - pagedItems.length} older)
+          </Btn>
+        </div>
+      )}
       {open && (
         <Modal title={addLabel} onClose={() => setOpen(false)}>
           {renderForm ? renderForm({ addItem, close: () => setOpen(false) }) : <SchemaForm schema={schema} onSubmit={add} />}
@@ -790,8 +815,8 @@ function computeTimeline(meta, progress, agreement) {
   const autoEstimate = periodToDays(agreedText);
   const estimate = t.estimatedDays ? Number(t.estimatedDays) : autoEstimate;
   const estimateSource = t.estimatedDays ? "set by you" : autoEstimate ? `agreement: “${agreedText}”` : "";
-  const todayD = new Date(today());
-  const startD = start ? new Date(start) : null;
+  const todayD = localDay(today());
+  const startD = start ? localDay(start) : null;
   const passed = startD ? Math.max(0, Math.round((todayD - startD) / 86400000) + 1) : null;
   const due = startD && estimate ? new Date(startD.getTime() + estimate * 86400000) : null;
   const remaining = due ? Math.round((due - todayD) / 86400000) : null;
@@ -805,7 +830,7 @@ function TimelineCard({ meta, setMeta, progress, agreement }) {
   const [draft, setDraft] = useState({});
   const aiPct = meta.planReview?.progressPct;
   const timePct = tl.estimate && tl.passed ? Math.min(100, Math.round((tl.passed / tl.estimate) * 100)) : null;
-  const fmt = (d) => (d ? new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—");
+  const fmt = (d) => (!d ? "—" : typeof d === "string" ? fmtDay(d) : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }));
   const save = async () => {
     const next = { ...meta, timeline: { startDate: draft.startDate || "", estimatedDays: draft.estimatedDays || "", workingDays: draft.workingDays === "" ? "" : draft.workingDays } };
     setMeta(next);
@@ -2336,13 +2361,68 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
       completedStages: (m.completedStages || []).filter((x) => x !== stage),
       stageManualOff: (m.stageManualOff || []).filter((x) => x !== stage),
     }));
+  // ---- Find a day in the log
+  const [logMode, setLogMode] = useState("all"); // all | date | range
+  const [logDate, setLogDate] = useState("");
+  const [logFrom, setLogFrom] = useState("");
+  const [logTo, setLogTo] = useState("");
+  const [logStage, setLogStage] = useState("");
+  const [logSearch, setLogSearch] = useState("");
+  const [logFlagged, setLogFlagged] = useState(false);
+  const loggedDates = [...new Set(progress.map((p) => p.date).filter(Boolean))].sort();
+  const logFilter = (p) => {
+    if (logMode === "date" && logDate && p.date !== logDate) return false;
+    if (logMode === "range" && ((logFrom && p.date < logFrom) || (logTo && p.date > logTo))) return false;
+    if (logStage && p.stage !== logStage) return false;
+    if (logFlagged && !(p.flag === "Watch" || p.flag === "Red Flag")) return false;
+    if (logSearch.trim()) {
+      const q = logSearch.trim().toLowerCase();
+      const hay = [p.description, p.stage, p.reportedBy, p.flagReason].filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  };
+  const logFiltered = logMode !== "all" || logStage || logSearch.trim() || logFlagged;
+  const logMatches = progress.filter(logFilter).length;
+  const stepDay = (dir) => {
+    const base = logDate || loggedDates[loggedDates.length - 1];
+    const idx = loggedDates.indexOf(base);
+    const next = idx === -1
+      ? (dir < 0 ? [...loggedDates].reverse().find((d) => d < base) : loggedDates.find((d) => d > base))
+      : loggedDates[idx + dir];
+    if (next) { setLogMode("date"); setLogDate(next); }
+  };
+  const nearestDays = (d) => {
+    const before = [...loggedDates].reverse().find((x) => x < d);
+    const after = loggedDates.find((x) => x > d);
+    return { before, after };
+  };
+  const clearLogFilter = () => { setLogMode("all"); setLogDate(""); setLogFrom(""); setLogTo(""); setLogStage(""); setLogSearch(""); setLogFlagged(false); };
+
   const [newStage, setNewStage] = useState("");
+  const [newStageAfter, setNewStageAfter] = useState(""); // "" = at the end
+  const [reordering, setReordering] = useState(false);
   const addCustomStage = async () => {
     const name = newStage.trim();
     if (!name || getStages(metaRef.current).some((x) => x.toLowerCase() === name.toLowerCase())) { setNewStage(""); return; }
-    await patchMeta((m) => ({ ...m, customStages: [...(m.customStages || []), name] }));
+    await patchMeta((m) => {
+      const current = getStages(m).filter((x) => x !== "Other");
+      const at = newStageAfter ? current.indexOf(newStageAfter) + 1 : current.length;
+      const order = [...current.slice(0, at), name, ...current.slice(at)];
+      return { ...m, customStages: [...(m.customStages || []), name], stageOrder: order };
+    });
     setNewStage("");
   };
+  const moveStage = (name, dir) =>
+    patchMeta((m) => {
+      const order = getStages(m).filter((x) => x !== "Other");
+      const i = order.indexOf(name);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= order.length) return m;
+      [order[i], order[j]] = [order[j], order[i]];
+      return { ...m, stageOrder: order };
+    });
+  const resetStageOrder = () => patchMeta((m) => ({ ...m, stageOrder: [] }));
   const removeCustomStage = (name) => {
     if (!window.confirm(`Remove the stage "${name}"? Log entries already using it are kept.`)) return;
     patchMeta((m) => ({ ...m, customStages: (m.customStages || []).filter((x) => x !== name) }));
@@ -2391,7 +2471,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
           Stage completion
         </h3>
         <p style={{ color: C.concrete }} className="text-xs mb-3">
-          Stages tick themselves off automatically: when a log entry or WhatsApp update says a stage is finished (<b>AI</b>), or when the next structural stage has started (<b>auto</b>). Tap a stage to override it yourself; “reset” hands it back to AI.
+          Stages tick themselves off automatically: when a log entry or WhatsApp update says a stage is finished (<b>AI</b>), or when the next structural stage has started (<b>auto</b>). Tap a stage to override it yourself. If you untick one the AI marked, it shows a dashed “not done” chip — the ↺ icon hands it back to AI.
         </p>
         <div className="flex flex-wrap gap-2">
           {getStages(meta).filter((x) => x !== "Other").map((x) => {
@@ -2418,11 +2498,21 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
                   {st.done && <CheckCircle2 size={13} />}
                   {x}
                   {tag && <span style={{ background: "rgba(255,255,255,0.25)" }} className="text-[9px] uppercase px-1 rounded">{tag}</span>}
-                  {st.how === "manual-off" && <span style={{ color: C.concrete }} className="text-[9px] uppercase">not done</span>}
+                  {st.how === "manual-off" && (
+                    <>
+                      <span style={{ color: C.concrete }} className="text-[9px] uppercase">not done</span>
+                      <span
+                        role="button"
+                        title="Undo my override — let AI decide again"
+                        onClick={(e) => { e.stopPropagation(); resetStageToAuto(x); }}
+                        style={{ color: C.navy }}
+                        className="ml-0.5 inline-flex"
+                      >
+                        <RotateCcw size={12} />
+                      </span>
+                    </>
+                  )}
                 </button>
-                {(st.how === "manual-off" || (st.how === "manual" && (st.auto || st.implied))) && (
-                  <button onClick={() => resetStageToAuto(x)} style={{ color: C.navy }} className="text-[10px] underline ml-1">reset</button>
-                )}
                 {custom && (
                   <button onClick={() => removeCustomStage(x)} title="Remove this stage" style={{ color: C.concrete }} className="ml-0.5 hover:text-red-600"><X size={12} /></button>
                 )}
@@ -2438,8 +2528,37 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
             onChange={(e) => setNewStage(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addCustomStage()}
           />
+          <select
+            style={{ ...inputStyle, width: "auto", padding: "6px 8px", fontSize: 13 }}
+            value={newStageAfter}
+            onChange={(e) => setNewStageAfter(e.target.value)}
+            title="Where the new stage goes"
+          >
+            <option value="">at the end</option>
+            {getStages(meta).filter((x) => x !== "Other").map((x) => <option key={x} value={x}>after {x}</option>)}
+          </select>
           <Btn small tone="ghost" onClick={addCustomStage} disabled={!newStage.trim()}><Plus size={13} /> Add stage</Btn>
+          <Btn small tone="ghost" onClick={() => setReordering(true)}><ListOrdered size={13} /> Reorder stages</Btn>
         </div>
+        {reordering && (
+          <Modal title="Reorder stages" onClose={() => setReordering(false)}>
+            <p style={{ color: C.concrete }} className="text-xs mb-3">Use the arrows to move a stage. The order is used on the Dashboard, in the log form and by the AI.</p>
+            <div className="space-y-1.5 mb-4">
+              {getStages(meta).filter((x) => x !== "Other").map((x, i, arr) => (
+                <div key={x} style={{ background: "#fff", border: `1px solid ${C.line}` }} className="rounded-md px-3 py-1.5 flex items-center gap-2 text-sm">
+                  <span style={{ color: C.concrete, fontFamily: "'IBM Plex Mono', monospace" }} className="text-xs w-5 text-right">{i + 1}</span>
+                  <span className="flex-1" style={{ color: C.ink }}>{x}{(meta.customStages || []).includes(x) && <span style={{ color: C.concrete }} className="text-xs"> · your stage</span>}</span>
+                  <button onClick={() => moveStage(x, -1)} disabled={i === 0} title="Move up" style={{ color: i === 0 ? C.line : C.navy }} className="p-1"><ArrowUp size={15} /></button>
+                  <button onClick={() => moveStage(x, 1)} disabled={i === arr.length - 1} title="Move down" style={{ color: i === arr.length - 1 ? C.line : C.navy }} className="p-1"><ArrowDown size={15} /></button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-3">
+              <Btn onClick={() => setReordering(false)}><CheckCircle2 size={15} /> Done</Btn>
+              {(meta.stageOrder || []).length > 0 && <button onClick={resetStageOrder} style={{ color: C.navy }} className="text-xs underline">Back to default order</button>}
+            </div>
+          </Modal>
+        )}
       </div>
 
       <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
@@ -2516,6 +2635,65 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
         addLabel="Log today's progress"
         enableImportExport
         exportFileName="daily-progress-log"
+        extraFilter={logFilter}
+        filterKey={[logMode, logDate, logFrom, logTo, logStage, logSearch, logFlagged].join("|")}
+        pageSize={20}
+        emptyFilteredText={
+          logMode === "date" && logDate
+            ? (() => {
+                const { before, after } = nearestDays(logDate);
+                return `No log entry for ${fmtDay(logDate, { weekday: "long", day: "numeric", month: "short", year: "numeric" })}${before || after ? ` — nearest logged days: ${[before, after].filter(Boolean).map((d) => fmtDay(d, { day: "numeric", month: "short" })).join(" and ")}` : ""}.`;
+              })()
+            : "No entries match this filter."
+        }
+        toolbar={progress.length > 0 && (
+          <div style={{ background: C.card, border: `1px solid ${C.line}` }} className="rounded-lg p-3 mb-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mr-1">Find</span>
+              {[["all", "All days"], ["date", "On a date"], ["range", "Between dates"]].map(([k, label]) => (
+                <button
+                  key={k}
+                  onClick={() => { setLogMode(k); if (k === "date" && !logDate) setLogDate(loggedDates[loggedDates.length - 1] || today()); }}
+                  style={{ background: logMode === k ? C.navy : "#fff", color: logMode === k ? "#fff" : C.ink, border: `1px solid ${logMode === k ? C.navy : C.line}` }}
+                  className="rounded-full px-3 py-1 text-xs font-semibold"
+                >
+                  {label}
+                </button>
+              ))}
+              {logMode === "date" && (
+                <span className="flex items-center gap-1">
+                  <button onClick={() => stepDay(-1)} title="Previous logged day" style={{ color: C.navy }} className="px-1.5 text-sm font-bold">‹</button>
+                  <input type="date" style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 13 }} value={logDate} onChange={(e) => setLogDate(e.target.value)} />
+                  <button onClick={() => stepDay(1)} title="Next logged day" style={{ color: C.navy }} className="px-1.5 text-sm font-bold">›</button>
+                </span>
+              )}
+              {logMode === "range" && (
+                <span className="flex items-center gap-1 text-xs" style={{ color: C.concrete }}>
+                  <input type="date" style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 13 }} value={logFrom} onChange={(e) => setLogFrom(e.target.value)} />
+                  to
+                  <input type="date" style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 13 }} value={logTo} onChange={(e) => setLogTo(e.target.value)} />
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap mt-2">
+              <select style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 13 }} value={logStage} onChange={(e) => setLogStage(e.target.value)}>
+                <option value="">All stages</option>
+                {stages.map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+              <span className="relative">
+                <Search size={13} style={{ color: C.concrete, position: "absolute", left: 8, top: 8 }} />
+                <input style={{ ...inputStyle, width: 220, padding: "4px 8px 4px 26px", fontSize: 13 }} placeholder="Search notes, e.g. PCC, steel" value={logSearch} onChange={(e) => setLogSearch(e.target.value)} />
+              </span>
+              <label className="flex items-center gap-1.5 text-xs" style={{ color: C.ink }}>
+                <input type="checkbox" checked={logFlagged} onChange={(e) => setLogFlagged(e.target.checked)} /> Flagged only
+              </label>
+              <span style={{ color: C.concrete }} className="text-xs ml-auto">
+                {logFiltered ? `Showing ${logMatches} of ${progress.length} entries` : `${progress.length} entries · ${loggedDates.length} days logged`}
+                {logFiltered && <button onClick={clearLogFilter} style={{ color: C.navy }} className="underline ml-2">Clear</button>}
+              </span>
+            </div>
+          </div>
+        )}
         renderForm={({ addItem, updateItem, initial }) =>
           initial
             ? <ProgressEntryForm key={initial.id} initial={initial} stages={stages} onSave={saveEdit(initial, updateItem)} />
