@@ -1830,6 +1830,195 @@ function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, d
 }
 
 /* ---------------------------------------------------------------------- */
+/*  Builder details — read from the uploaded agreement by AI                */
+/* ---------------------------------------------------------------------- */
+const BUILDER_FIELDS = [
+  { key: "companyName", label: "Builder / company name" },
+  { key: "contactPerson", label: "Contact person / signatory" },
+  { key: "phone", label: "Phone" },
+  { key: "email", label: "Email" },
+  { key: "address", label: "Registered address", multiline: true },
+  { key: "gstin", label: "GSTIN" },
+  { key: "registrationNo", label: "Company / firm registration no. (CIN etc.)" },
+  { key: "licenseNo", label: "Contractor licence / RERA no." },
+  { key: "pan", label: "PAN" },
+  { key: "agreementDate", label: "Agreement date" },
+  { key: "contractValue", label: "Contract value (as written)" },
+];
+
+// Pull the first {...} block out of an AI reply and parse it.
+function parseJsonLoose(text) {
+  const t = (text || "").replace(/```json|```/g, "");
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("The AI reply didn't contain the details in the expected format.");
+  return JSON.parse(t.slice(start, end + 1));
+}
+
+async function extractBuilderDetails(file) {
+  const mime = file.mimeType || "application/octet-stream";
+  let images;
+  if (mime === "application/pdf" && file.data.length > 1500000) {
+    // Big scanned agreements: send the first pages as images (names and
+    // registration details are almost always on the first pages).
+    const res = await pdfToImages(file.data, { maxPages: 5, width: 1600, quality: 0.75 });
+    images = res.images.map((data) => ({ data, mimeType: "image/jpeg" }));
+  } else if (mime.startsWith("image/") && file.data.length > 1500000) {
+    images = [{ data: await shrinkBase64Image(file.data, 1800, 0.8), mimeType: "image/jpeg" }];
+  } else if (mime === "application/pdf" || mime.startsWith("image/")) {
+    images = [{ data: file.data, mimeType: mime }];
+  } else {
+    throw new Error("Only PDF or photo/scan agreements can be read. Word files aren't supported — save it as PDF and re-upload.");
+  }
+  const text = `The attached file is a house construction agreement from Bangalore, India, between a homeowner and a builder/contractor. Read it carefully and extract the BUILDER's (contractor's) details — not the homeowner's.
+
+Reply with ONLY a JSON object, no other text, using exactly these keys:
+{
+  "companyName": "", "contactPerson": "", "phone": "", "email": "", "address": "",
+  "gstin": "", "registrationNo": "", "licenseNo": "", "pan": "",
+  "agreementDate": "", "contractValue": ""
+}
+Rules: copy values exactly as written in the document; use "" for anything not present — never guess. "registrationNo" is a company/firm registration such as CIN or partnership registration. "licenseNo" is a contractor licence or RERA number. "contractValue" is the total contract amount as written.`;
+  const out = await askClaude({ text, images });
+  const raw = parseJsonLoose(out);
+  const clean = {};
+  BUILDER_FIELDS.forEach((f) => { clean[f.key] = typeof raw[f.key] === "string" ? raw[f.key].trim() : raw[f.key] ? String(raw[f.key]) : ""; });
+  return clean;
+}
+
+function BuilderDetailsCard({ agreement, setAgreement, documents, contacts, setContacts }) {
+  const agreementDocs = documents.filter((d) => d.type === "Agreement" && d.attachment?.data);
+  const [docId, setDocId] = useState(agreementDocs[0]?.id || "");
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState(null); // details being reviewed before saving
+  const [addToPeople, setAddToPeople] = useState(true);
+  const builder = agreement?.builder;
+
+  useEffect(() => {
+    if (!docId && agreementDocs[0]) setDocId(agreementDocs[0].id);
+  }, [agreementDocs.length]);
+
+  const readAgreement = async () => {
+    const doc = agreementDocs.find((d) => d.id === docId) || agreementDocs[0];
+    if (!doc) return;
+    setReading(true);
+    setError("");
+    try {
+      const details = await extractBuilderDetails(doc.attachment);
+      setDraft({ ...details, _source: doc.title, _docId: doc.id });
+      const exists = contacts.some((c) => c.role === "Builder" && details.companyName && (c.name || "").toLowerCase().includes(details.companyName.toLowerCase()));
+      setAddToPeople(!exists);
+    } catch (e) {
+      console.error("[SiteLedger] Builder details extraction failed", e);
+      const busy = /high demand|overloaded|try again later|\(429\)|\(503\)/i.test(e?.message || "");
+      setError(busy ? "The AI service is busy right now — please try again in a few minutes." : `Couldn't read the agreement. ${e?.message || ""}`);
+    }
+    setReading(false);
+  };
+
+  const save = async () => {
+    const { _source, _docId, ...details } = draft;
+    const next = {
+      ...agreement,
+      builderName: details.companyName || agreement.builderName,
+      builder: { ...details, source: _source || builder?.source || "Entered manually", readAt: new Date().toISOString() },
+    };
+    setAgreement(next);
+    await saveKey("agreement", next);
+
+    if (addToPeople && (details.companyName || details.contactPerson)) {
+      const name = [details.companyName, details.contactPerson && `(${details.contactPerson})`].filter(Boolean).join(" ");
+      const notes = [details.address, details.gstin && `GSTIN: ${details.gstin}`, details.email].filter(Boolean).join("\n");
+      const nextContacts = [{ id: uid(), role: "Builder", name, phone: details.phone || "", notes }, ...contacts];
+      setContacts(nextContacts);
+      await saveKey("contacts", nextContacts);
+    }
+    setDraft(null);
+  };
+
+  const filled = builder && BUILDER_FIELDS.some((f) => builder[f.key]);
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
+      <div className="flex items-start justify-between flex-wrap gap-2 mb-3">
+        <div>
+          <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide flex items-center gap-2">
+            <Hammer size={15} /> Builder details
+          </h3>
+          <p style={{ color: C.concrete }} className="text-xs">
+            {filled
+              ? `From ${builder.source}${builder.readAt ? ` · updated ${new Date(builder.readAt).toLocaleDateString()}` : ""}`
+              : "Let AI read your uploaded agreement and fill in the builder's name, address and registration details."}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {agreementDocs.length > 1 && (
+            <select style={{ ...inputStyle, width: "auto", padding: "6px 8px", fontSize: 12 }} value={docId} onChange={(e) => setDocId(e.target.value)}>
+              {agreementDocs.map((d) => <option key={d.id} value={d.id}>{d.title}</option>)}
+            </select>
+          )}
+          {agreementDocs.length > 0 && (
+            <Btn small tone="rust" onClick={readAgreement} disabled={reading}>
+              {reading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+              {reading ? "Reading agreement…" : filled ? "Re-read agreement" : "Read from agreement"}
+            </Btn>
+          )}
+          <Btn small tone="ghost" onClick={() => setDraft({ ...(builder || {}), _source: builder?.source || "Entered manually" })}>
+            <Pencil size={13} /> {filled ? "Edit" : "Enter manually"}
+          </Btn>
+        </div>
+      </div>
+      {agreementDocs.length === 0 && !filled && (
+        <p style={{ color: C.concrete }} className="text-xs italic">Upload the agreement in Documents (type “Agreement”, PDF or photo) and a “Read from agreement” button will appear here.</p>
+      )}
+      {error && <p style={{ color: C.red }} className="text-xs mb-2">{error}</p>}
+      {filled && (
+        <div className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+          {BUILDER_FIELDS.filter((f) => builder[f.key]).map((f) => (
+            <div key={f.key} className={f.multiline ? "sm:col-span-2" : ""}>
+              <div style={{ color: C.concrete }} className="text-[11px] uppercase font-semibold tracking-wide">{f.label}</div>
+              {f.key === "phone" ? (
+                <a href={`tel:${builder.phone.replace(/[^0-9+]/g, "")}`} style={{ color: C.navy }} className="text-sm underline">{builder.phone}</a>
+              ) : f.key === "email" ? (
+                <a href={`mailto:${builder.email}`} style={{ color: C.navy }} className="text-sm underline">{builder.email}</a>
+              ) : f.key === "address" ? (
+                <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(builder.address)}`} target="_blank" rel="noreferrer" style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-sm hover:underline">{builder.address}</a>
+              ) : (
+                <div style={{ color: C.ink, fontFamily: ["gstin", "registrationNo", "licenseNo", "pan"].includes(f.key) ? "'IBM Plex Mono', monospace" : undefined }} className="text-sm">{builder[f.key]}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft && (
+        <Modal title="Check builder details" onClose={() => setDraft(null)}>
+          <p style={{ color: C.concrete }} className="text-xs mb-3 flex gap-1.5">
+            <Sparkles size={12} className="shrink-0 mt-0.5" />
+            <span>{draft._source && draft._source !== "Entered manually" ? `Read by AI from “${draft._source}”. ` : ""}Please check against the agreement and correct anything before saving.</span>
+          </p>
+          {BUILDER_FIELDS.map((f) => (
+            <Field key={f.key} label={f.label}>
+              {f.multiline ? (
+                <textarea style={{ ...inputStyle, minHeight: 60 }} value={draft[f.key] || ""} onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })} />
+              ) : (
+                <input style={inputStyle} value={draft[f.key] || ""} onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })} />
+              )}
+            </Field>
+          ))}
+          <label className="flex items-center gap-2 text-sm mb-4" style={{ color: C.ink }}>
+            <input type="checkbox" checked={addToPeople} onChange={(e) => setAddToPeople(e.target.checked)} />
+            Also add the builder to People (contacts)
+          </label>
+          <Btn onClick={save}><CheckCircle2 size={15} /> Save builder details</Btn>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
 /*  Budget / expenses / loan tab                                           */
 /* ---------------------------------------------------------------------- */
 const EXPENSE_CATEGORIES = ["Material", "Labor", "Builder Payment", "Permission / Govt Fee", "Professional Fee", "Transport", "Other"];
@@ -1859,7 +2048,7 @@ function loanDisbursed(loan) {
   return disb.reduce((sum, e) => sum + Number(e.amount || 0), 0);
 }
 
-function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, setLoan, agreement, setAgreement }) {
+function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, setLoan, agreement, setAgreement, documents = [], contacts = [], setContacts }) {
   const [budgetDraft, setBudgetDraft] = useState(meta.budgetAllocated || "");
   const [markingId, setMarkingId] = useState(null); // milestone id currently being marked paid
   const [markDraft, setMarkDraft] = useState({ paidDate: today(), paidAmount: "", notes: "" });
@@ -1950,6 +2139,8 @@ function BudgetTab({ expenses, setExpenses, permissions, meta, setMeta, loan, se
           </div>
         </div>
       </div>
+
+      <BuilderDetailsCard agreement={agreement} setAgreement={setAgreement} documents={documents} contacts={contacts} setContacts={setContacts} />
 
       {/* Builder payment as per construction agreement */}
       <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
@@ -2849,6 +3040,7 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
             permissions={permissions} meta={meta} setMeta={setMeta}
             loan={loan} setLoan={setLoan}
             agreement={agreement} setAgreement={setAgreement}
+            documents={documents} contacts={contacts} setContacts={setContacts}
           />
         )}
         {tab === "permissions" && canSee("permissions") && <PermissionsTab permissions={permissions} setPermissions={setPermissions} />}
