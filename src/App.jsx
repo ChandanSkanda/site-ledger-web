@@ -3,7 +3,7 @@ import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
   Trash2, Sparkles, Loader2, CheckCircle2, IndianRupee, CalendarDays, ShieldCheck, LogOut, UserCog, Repeat,
-  Upload, Download, Paperclip, Pencil,
+  Upload, Download, Paperclip, Pencil, MapPin,
 } from "lucide-react";
 import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
@@ -447,6 +447,8 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
               type={f.type || "text"}
               value={vals[f.key]}
               required={f.required}
+              placeholder={f.placeholder}
+              inputMode={f.inputMode}
               onChange={(e) => set(f.key, e.target.value)}
             />
           )}
@@ -2223,9 +2225,12 @@ const productSchema = [
   { key: "room", label: "Room / area", type: "text" },
   { key: "brand", label: "Brand / model", type: "text" },
   { key: "productId", label: "Product ID / material no. (optional)", type: "text" },
+  { key: "quantity", label: "Quantity", type: "text", placeholder: "e.g. 40 boxes, 120 sq ft, 6 nos" },
   { key: "price", label: "Price paid (₹)", type: "number" },
   { key: "claimedPrice", label: "Builder's quoted price (₹)", type: "number" },
   { key: "vendor", label: "Vendor / shop", type: "text" },
+  { key: "shopPhone", label: "Shop phone number", type: "tel", inputMode: "tel", placeholder: "e.g. +91 98450 12345" },
+  { key: "shopAddress", label: "Shop address", type: "textarea" },
   { key: "image", label: "Photo (helps you identify the exact product later)", type: "file", accept: "image/*" },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
@@ -2340,11 +2345,28 @@ function ProductsTab({ products, setProducts }) {
               {p.productId && (
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs mb-1">ID: {p.productId}</div>
               )}
+              {p.quantity && <div style={{ color: C.ink }} className="text-xs mb-1">Qty: <span className="font-semibold">{p.quantity}</span></div>}
               <div className="flex items-center gap-3">
                 {p.price && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.rust }} className="text-sm font-semibold">Paid {fmtINR(p.price)}</span>}
                 {p.claimedPrice && <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">Quoted {fmtINR(p.claimedPrice)}</span>}
               </div>
               {p.vendor && <div style={{ color: C.concrete }} className="text-xs mt-1">From {p.vendor}</div>}
+              {p.shopPhone && (
+                <a href={`tel:${p.shopPhone.replace(/[^0-9+]/g, "")}`} style={{ color: C.navy }} className="text-xs mt-1 inline-flex items-center gap-1 underline">
+                  <Phone size={12} /> {p.shopPhone}
+                </a>
+              )}
+              {p.shopAddress && (
+                <a
+                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([p.vendor, p.shopAddress].filter(Boolean).join(", "))}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: C.concrete, whiteSpace: "pre-wrap" }}
+                  className="text-xs mt-1 flex items-start gap-1 hover:underline"
+                >
+                  <MapPin size={12} className="shrink-0 mt-0.5" /> <span>{p.shopAddress}</span>
+                </a>
+              )}
               {p.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{p.notes}</p>}
             </div>
           </div>
