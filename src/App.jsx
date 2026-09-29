@@ -1877,6 +1877,12 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
               )}
               <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mb-1">Whose messages count as progress?</div>
               <p style={{ color: C.concrete }} className="text-xs mb-2">Matched to your People list by phone number or name. Add anyone unknown so the AI knows their role.</p>
+              {setContacts && (
+                <div className="flex items-center gap-2 flex-wrap mb-2">
+                  <MembersScreenshotImport contacts={contacts} setContacts={setContacts} label="Match using a group-members screenshot" />
+                  <span style={{ color: C.concrete }} className="text-[11px]">Senders shown as numbers? A screenshot of Group info → Members fills in names, numbers and roles in one go.</span>
+                </div>
+              )}
               <div className="grid gap-2 sm:grid-cols-2 mb-4">
                 {data.senders.map(([name, n]) => {
                   const c = matchContact(name, contacts);
@@ -3521,17 +3527,264 @@ function ContactAvatar({ contact, size = 48 }) {
   );
 }
 
+// Quick "add number" box on a contact card (WhatsApp exports don't include numbers).
+function QuickPhone({ contact, onSave }) {
+  const [val, setVal] = useState("");
+  const [saving, setSaving] = useState(false);
+  const digits = val.replace(/\D/g, "");
+  const save = async () => {
+    if (digits.length < 10) return;
+    setSaving(true);
+    await onSave(val.trim());
+    setSaving(false);
+  };
+  return (
+    <div className="mt-1.5">
+      <div className="flex items-center gap-1.5">
+        <input
+          type="tel"
+          inputMode="tel"
+          placeholder="Add phone, e.g. +91 90085 02583"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && save()}
+          style={{ ...inputStyle, padding: "4px 8px", fontSize: 13, maxWidth: 230 }}
+        />
+        <Btn small onClick={save} disabled={saving || digits.length < 10}>{saving ? <Loader2 size={12} className="animate-spin" /> : "Save"}</Btn>
+      </div>
+      <div style={{ color: C.concrete }} className="text-[11px] mt-1">Tip: in the WhatsApp group, tap Group info → {contact.name} to see their number.</div>
+    </div>
+  );
+}
+
+// wa.me needs the full number with country code; assume India if only 10 digits.
+const waLink = (phone) => {
+  let d = String(phone || "").replace(/\D/g, "");
+  if (d.length === 10) d = "91" + d;
+  return `https://wa.me/${d}`;
+};
+
+/* ---------------------------------------------------------------------- */
+/*  Add people from a screenshot of the WhatsApp group's member list        */
+/* ---------------------------------------------------------------------- */
+const looksLikeNumberName = (name) => !/[a-zÀ-￿]/i.test(String(name || "").replace(/^~\s*/, "")) && last10(name).length === 10;
+
+async function readMembersFromScreenshots(images, roles) {
+  const text = `These are screenshots of a WhatsApp group's member list ("Group info" → Members) for a house-construction project in Bangalore, India.
+List EVERY member you can see across all screenshots. For each member return:
+- "name": the name exactly as shown, without the leading "~". If the name uses decorative/fancy letters, give the plain-English reading (e.g. "RⱥvᎥkᎥℝⱥn" → "Ravikiran"). If only a phone number is shown, use "" for name.
+- "phone": the phone number with country code exactly as shown (e.g. "+91 90085 02583"), or "" if none is visible.
+- "admin": true if marked "Group admin", else false.
+- "you": true only for the row labelled "You".
+- "role": your best guess from the name ONLY if it clearly says so (e.g. "Builder Ballery" → "Builder", "Ramesh Electrician" → "Electrician"), chosen from: ${roles.join(", ")}. Otherwise "".
+Skip headings, the search bar, "Add members", "Invite via link" and similar buttons. Don't list the same person twice.
+Reply with ONLY a JSON object like {"members":[{"name":"","phone":"","admin":false,"you":false,"role":""}]}`;
+  const out = await askClaude({ text, images });
+  const parsed = parseJsonLoose(out);
+  const list = Array.isArray(parsed) ? parsed : parsed.members || [];
+  const seen = new Set();
+  return list
+    .map((m) => ({
+      name: String(m.name || "").replace(/^~\s*/, "").trim(),
+      phone: String(m.phone || "").trim(),
+      admin: !!m.admin,
+      you: !!m.you || /^you$/i.test(String(m.name || "").trim()),
+      role: roles.includes(m.role) ? m.role : "",
+    }))
+    .filter((m) => m.name || last10(m.phone).length === 10)
+    .filter((m) => {
+      const k = last10(m.phone).length === 10 ? last10(m.phone) : m.name.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+}
+
+// What saving a reviewed row would do to the People list.
+function memberAction(row, contacts) {
+  const byPhone = last10(row.phone).length === 10 ? contacts.find((c) => last10(c.phone) === last10(row.phone)) : null;
+  const match = byPhone || (row.name ? matchContact(row.name, contacts) : null);
+  if (!match) return { kind: "new" };
+  const addPhone = !match.phone && last10(row.phone).length === 10;
+  const fixName = row.name && (looksLikeNumberName(match.name) || /^~/.test(match.name)) && match.name !== row.name;
+  const otherPhone = match.phone && last10(row.phone).length === 10 && last10(match.phone) !== last10(row.phone);
+  if (addPhone || fixName) return { kind: "update", match, addPhone, fixName };
+  return { kind: "same", match, otherPhone };
+}
+
+function MembersScreenshotImport({ contacts = [], setContacts, small = true, label = "Add from group-members screenshot" }) {
+  const roles = contactSchema[0].options;
+  const fileRef = useRef();
+  const [open, setOpen] = useState(false);
+  const [shots, setShots] = useState([]); // [{ name, data }]
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+
+  const reset = () => { setShots([]); setRows(null); setError(""); setDone(""); setBusy(false); };
+  const close = () => { setOpen(false); reset(); };
+
+  const onPick = async (e) => {
+    const files = [...e.target.files];
+    e.target.value = "";
+    const added = [];
+    for (const f of files) added.push({ name: f.name, data: await compressImage(f, 1400, 0.8) });
+    setShots((s) => [...s, ...added].slice(0, 8));
+  };
+
+  const read = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const members = await readMembersFromScreenshots(shots.map((s) => ({ data: s.data, mimeType: "image/jpeg" })), roles);
+      if (!members.length) throw new Error("Couldn't find any members in those screenshots. Make sure the member list is visible.");
+      setRows(members.map((m, i) => {
+        const act = memberAction(m, contacts);
+        return {
+          key: i,
+          ...m,
+          role: m.role || act.match?.role || "Other",
+          include: !m.you && act.kind !== "same",
+        };
+      }));
+    } catch (err) {
+      setError(err.message || "Couldn't read the screenshots — try again.");
+    }
+    setBusy(false);
+  };
+
+  const setRow = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  const save = async () => {
+    let next = [...contacts];
+    let added = 0, updated = 0;
+    for (const r of rows.filter((x) => x.include)) {
+      const act = memberAction(r, next);
+      if (act.kind === "new") {
+        if (!r.name && !r.phone) continue;
+        next = [{ id: uid(), role: r.role || "Other", name: r.name || r.phone, phone: r.phone, notes: `Added from group members screenshot${r.admin ? " · Group admin" : ""}` }, ...next];
+        added++;
+      } else if (act.kind === "update") {
+        next = next.map((c) => (c.id === act.match.id ? { ...c, ...(act.addPhone ? { phone: r.phone } : {}), ...(act.fixName ? { name: r.name } : {}) } : c));
+        updated++;
+      }
+    }
+    setContacts(next);
+    await saveKey("contacts", next);
+    setDone(`${added} added · ${updated} updated with phone numbers or names.`);
+    setRows(null);
+    setShots([]);
+  };
+
+  const picked = rows ? rows.filter((r) => r.include).length : 0;
+
+  return (
+    <>
+      <Btn small={small} tone="ghost" onClick={() => setOpen(true)}>
+        <Camera size={14} /> {label}
+      </Btn>
+      {open && (
+        <Modal title="Add people from a screenshot" onClose={close} size="large">
+          {!rows && (
+            <div>
+              <p style={{ color: C.ink }} className="text-sm mb-2">
+                WhatsApp exports don't include phone numbers — but the group's member list does. Take screenshots of it and the AI will read the names and numbers for you.
+              </p>
+              <ol style={{ color: C.concrete }} className="text-xs mb-3 list-decimal pl-5 space-y-0.5">
+                <li>Open the WhatsApp group → tap the group name at the top.</li>
+                <li>Scroll to <b>Members</b> (tap “View all” if shown).</li>
+                <li>Take a screenshot; scroll and take more until everyone is covered (up to 8).</li>
+              </ol>
+              <input type="file" accept="image/*" multiple ref={fileRef} className="hidden" onChange={onPick} />
+              <div className="flex flex-wrap gap-2 mb-3">
+                {shots.map((s, i) => (
+                  <div key={i} className="relative">
+                    <img src={`data:image/jpeg;base64,${s.data}`} alt={s.name} style={{ height: 120, border: `1px solid ${C.line}` }} className="rounded-md" />
+                    <button type="button" onClick={() => setShots(shots.filter((_, j) => j !== i))} style={{ background: "#fff", color: C.concrete, border: `1px solid ${C.line}` }} className="absolute -top-2 -right-2 rounded-full p-0.5">
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {done && <p style={{ color: C.green }} className="text-sm font-semibold mb-3 flex items-center gap-1"><CheckCircle2 size={14} /> {done}</p>}
+              {error && <p style={{ color: C.rust }} className="text-sm mb-3">{error}</p>}
+              <div className="flex gap-2 flex-wrap">
+                <Btn tone="ghost" onClick={() => fileRef.current.click()} disabled={busy || shots.length >= 8}>
+                  <Paperclip size={14} /> {shots.length ? "Add another screenshot" : "Choose screenshots"}
+                </Btn>
+                <Btn tone="rust" onClick={read} disabled={busy || !shots.length}>
+                  {busy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} {busy ? "Reading members…" : "Read members"}
+                </Btn>
+                {done && <Btn onClick={close}>Done</Btn>}
+              </div>
+            </div>
+          )}
+          {rows && (
+            <div>
+              <p style={{ color: C.concrete }} className="text-xs mb-3">
+                Found {rows.length} member{rows.length === 1 ? "" : "s"}. Check the names and numbers, pick a role, then save. People already in your list get their missing number filled in — nothing is duplicated.
+              </p>
+              <div className="space-y-2 mb-4">
+                {rows.map((r) => {
+                  const act = memberAction(r, contacts);
+                  const status = r.you
+                    ? { text: "This is you", color: C.concrete }
+                    : act.kind === "new"
+                    ? { text: "New contact", color: C.navy }
+                    : act.kind === "update"
+                    ? { text: `Matches ${act.match.name} — will ${[act.addPhone && "add phone", act.fixName && "set name"].filter(Boolean).join(" & ")}`, color: C.green }
+                    : { text: act.otherPhone ? `Already saved as ${act.match.name} (different number: ${act.match.phone})` : `Already saved as ${act.match.name}`, color: C.concrete };
+                  return (
+                    <div key={r.key} style={{ background: "#fff", border: `1px solid ${r.include ? C.navy : C.line}`, opacity: r.include ? 1 : 0.7 }} className="rounded-md p-2.5 grid gap-2 sm:grid-cols-[auto_1fr_1fr_160px] items-center">
+                      <input type="checkbox" checked={r.include} onChange={(e) => setRow(r.key, { include: e.target.checked })} aria-label={`Include ${r.name || r.phone}`} />
+                      <input style={{ ...inputStyle, padding: "5px 8px", fontSize: 13 }} value={r.name} placeholder="Name" onChange={(e) => setRow(r.key, { name: e.target.value })} />
+                      <input style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} value={r.phone} placeholder="Phone" inputMode="tel" onChange={(e) => setRow(r.key, { phone: e.target.value })} />
+                      <select style={{ ...inputStyle, padding: "5px 8px", fontSize: 13 }} value={r.role} onChange={(e) => setRow(r.key, { role: e.target.value })} disabled={act.kind !== "new"}>
+                        {roles.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                      <div style={{ color: status.color }} className="text-xs font-semibold sm:col-start-2 sm:col-span-3">
+                        {status.text}{r.admin ? " · Group admin" : ""}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <Btn tone="rust" onClick={save} disabled={!picked}><CheckCircle2 size={15} /> Save {picked} to People</Btn>
+                <Btn tone="ghost" onClick={() => setRows(null)}>Back</Btn>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function PeopleTab({ contacts, setContacts }) {
+  const savePhone = async (id, phone) => {
+    const next = contacts.map((c) => (c.id === id ? { ...c, phone } : c));
+    setContacts(next);
+    await saveKey("contacts", next);
+  };
+  const missing = contacts.filter((c) => !c.phone).length;
   return (
     <ListSection
       icon={Users}
       title="People on the project"
-      subtitle="Builder, engineer, electrician, plumber — one tap to call"
+      subtitle={missing ? `Builder, engineer, electrician, plumber — one tap to call · ${missing} without a phone number (WhatsApp exports don't include numbers)` : "Builder, engineer, electrician, plumber — one tap to call"}
       schema={contactSchema}
       items={contacts}
       setItems={setContacts}
       storageKey="contacts"
       addLabel="Add contact"
+      toolbar={
+        <div className="flex items-center gap-2 flex-wrap mb-4">
+          <MembersScreenshotImport contacts={contacts} setContacts={setContacts} />
+          <span style={{ color: C.concrete }} className="text-xs">Fill in names and numbers from a screenshot of the WhatsApp group's member list.</span>
+        </div>
+      }
       renderCard={(c) => (
         <div className="flex gap-3">
           <ContactAvatar contact={c} />
@@ -3546,9 +3799,12 @@ function PeopleTab({ contacts, setContacts }) {
                 <a href={`tel:${c.phone.replace(/[^0-9+]/g, "")}`} style={{ color: C.rust }} className="inline-flex items-center gap-1 text-xs font-semibold">
                   <Phone size={13} /> Call
                 </a>
+                <a href={waLink(c.phone)} target="_blank" rel="noreferrer" style={{ color: C.green }} className="inline-flex items-center gap-1 text-xs font-semibold">
+                  WhatsApp
+                </a>
               </div>
             ) : (
-              <div style={{ color: C.concrete }} className="text-xs mt-1 italic">No phone number yet — tap edit to add</div>
+              <QuickPhone contact={c} onSave={(phone) => savePhone(c.id, phone)} />
             )}
             {c.notes && <p style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-sm mt-1">{c.notes}</p>}
           </div>
