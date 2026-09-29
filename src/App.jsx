@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import {
   Hammer, Camera, Wallet, FileCheck, Users, Package, Search, FileText,
   AlertTriangle, Phone, Plus, X, TrendingUp, Home, ClipboardList, Landmark,
@@ -9,6 +10,7 @@ import { loadKey, saveKey } from "./lib/storage";
 import { askClaude as askClaudeApi } from "./lib/ai";
 import { ROLE_LABELS, ROLE_TAB_ACCESS, ALL_ROLES } from "./lib/roles";
 import { getActiveProjectId } from "./lib/activeProject";
+import { readWhatsAppExport, groupByDay } from "./lib/whatsapp";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
 /* ---------------------------------------------------------------------- */
@@ -255,7 +257,10 @@ const inputStyle = {
 };
 
 function Modal({ title, onClose, children, size }) {
-  return (
+  // Rendered straight into <body> so a pop-up opened from inside a card
+  // isn't trapped by the card's hover animation.
+  return createPortal(
+
     <div
       className="ledger-modal-overlay fixed inset-0 flex items-center justify-center p-4 z-50"
       style={{ background: "rgba(22,50,79,0.6)", backdropFilter: "blur(1px)" }}
@@ -282,7 +287,9 @@ function Modal({ title, onClose, children, size }) {
         </div>
         <div className="p-5">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
+
   );
 }
 
@@ -339,14 +346,14 @@ const asFileList = (v) => (Array.isArray(v) ? v.filter(Boolean) : v ? [v] : []);
 // File picker that clearly shows what's attached. (The browser's own
 // "Choose File / No file chosen" box resets after we read the file, which
 // made it look like nothing was attached.)
-function FileField({ accept, value, onChange, multiple }) {
+function FileField({ accept, value, onChange, multiple, maxWidth = 1400 }) {
   const ref = useRef();
   const [busy, setBusy] = useState(false);
   const files = asFileList(value);
 
   const readFile = async (file) => {
     const isImage = file.type.startsWith("image/");
-    const data = isImage ? await compressImage(file, 1400, 0.8) : await fileToBase64(file);
+    const data = isImage ? await compressImage(file, maxWidth, 0.8) : await fileToBase64(file);
     return { name: file.name, mimeType: isImage ? "image/jpeg" : (file.type || "application/octet-stream"), data };
   };
 
@@ -440,7 +447,7 @@ function SchemaForm({ schema, initial, onSubmit, submitLabel = "Save" }) {
           ) : f.type === "textarea" ? (
             <textarea style={{ ...inputStyle, minHeight: "70px" }} value={vals[f.key]} onChange={(e) => set(f.key, e.target.value)} />
           ) : f.type === "file" ? (
-            <FileField accept={f.accept} multiple={f.multiple} value={vals[f.key]} onChange={(v) => set(f.key, v)} />
+            <FileField accept={f.accept} multiple={f.multiple} maxWidth={f.maxWidth} value={vals[f.key]} onChange={(v) => set(f.key, v)} />
           ) : (
             <input
               style={inputStyle}
@@ -722,7 +729,7 @@ function ListSection({ icon, title, subtitle, schema, items, setItems, storageKe
 /* ---------------------------------------------------------------------- */
 /*  Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
-function Dashboard({ data, setTab, currentUser }) {
+function Dashboard({ data, setTab, currentUser, autoCheck = "" }) {
   const { progress, expenses, permissions, contacts, products, documents, issues, gallery, meta, loan } = data;
 
   const spentOnExpenses = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
@@ -785,6 +792,57 @@ function Dashboard({ data, setTab, currentUser }) {
         {stat("Current stage", latestStage, C.navy, Hammer)}
         {stat("Open red flags", redFlags, redFlags ? C.red : C.green, AlertTriangle)}
       </div>
+
+      {/* AI progress assessment — from the latest plan cross-check (manual or weekly) */}
+      {(meta.planReview || autoCheck || meta.planSchedule) && (() => {
+        const r = meta.planReview;
+        const vs = r ? VERDICT_STYLE[r.verdict] || VERDICT_STYLE.Watch : null;
+        return (
+          <div style={{ background: C.card, border: `1px solid ${C.line}`, borderLeft: `4px solid ${vs ? vs.color : C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-8">
+            <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
+              <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide flex items-center gap-2">
+                <Sparkles size={15} /> AI progress assessment
+              </h3>
+              <div className="flex items-center gap-2">
+                {r && <Stamp tone={vs.tone}>{r.verdict}</Stamp>}
+                <button onClick={() => setTab("progress")} style={{ color: C.navy }} className="text-xs underline">Full report</button>
+              </div>
+            </div>
+            {autoCheck === "running" && (
+              <p style={{ color: C.concrete }} className="text-xs mb-2 flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Weekly plan check is running in the background…</p>
+            )}
+            {autoCheck && autoCheck !== "running" && <p style={{ color: C.yellow }} className="text-xs mb-2">{autoCheck}</p>}
+            {r ? (
+              <div className="grid gap-4 md:grid-cols-3 items-center">
+                <div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.ink }} className="text-3xl font-semibold">
+                    {r.progressPct !== null && r.progressPct !== undefined ? `${r.progressPct}%` : "—"}
+                  </div>
+                  <div style={{ color: C.concrete }} className="text-xs mb-1.5">of the house built · AI estimate</div>
+                  <div style={{ background: C.paperDark, height: 8 }} className="rounded-full overflow-hidden">
+                    <div style={{ width: `${r.progressPct || 0}%`, background: vs.color, height: "100%" }} />
+                  </div>
+                </div>
+                <div className="md:col-span-2">
+                  {(r.currentStage || r.nextMilestone) && (
+                    <div className="flex gap-4 flex-wrap text-xs mb-1.5" style={{ color: C.concrete }}>
+                      {r.currentStage && <span>Now at: <b style={{ color: C.ink }}>{r.currentStage}</b></span>}
+                      {r.nextMilestone && <span>Next: <b style={{ color: C.ink }}>{r.nextMilestone}</b></span>}
+                    </div>
+                  )}
+                  {r.summary && <p style={{ color: C.ink }} className="text-sm">{r.summary}</p>}
+                  <p style={{ color: C.concrete }} className="text-xs mt-1.5">
+                    Checked {new Date(r.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}{r.scheduled ? " (weekly auto-check)" : ""}
+                    {meta.planSchedule ? ` · next auto-check: ${nextPlanCheckLabel(meta)}` : ""}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              !autoCheck && <p style={{ color: C.concrete }} className="text-xs">The first weekly check will appear here once it runs.</p>
+            )}
+          </div>
+        );
+      })()}
 
       {expenses.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2 mb-8">
@@ -1078,7 +1136,8 @@ const FLAG_STYLE = {
 function ProgressCard({ entry, onRecheck }) {
   const [photos, setPhotos] = useState(null);
   const [preview, setPreview] = useState(null);
-  const hasPhotos = entry.photoSlots && entry.photoSlots.length > 0;
+  const hasPhotos = (entry.photoSlots && entry.photoSlots.length > 0) || entry.extraCount > 0;
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -1110,7 +1169,26 @@ function ProgressCard({ entry, onRecheck }) {
                 <span style={{ background: "rgba(0,0,0,0.55)", color: "#fff" }} className="absolute bottom-2 left-2 text-[10px] font-semibold px-1.5 py-0.5 rounded">{s.label}</span>
               </button>
             ))}
+            {slots.length === 0 && entry.extraCount > 0 && (
+              <button type="button" onClick={() => setShowAll(true)} className="relative block" style={{ height: 190 }}>
+                {photos?.extra?.[0] ? (
+                  <img src={`data:image/jpeg;base64,${photos.extra[0]}`} alt="Site photo" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center"><Loader2 size={18} className="animate-spin" style={{ color: C.concrete }} /></div>
+                )}
+              </button>
+            )}
           </div>
+          {entry.extraCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              style={{ background: "rgba(0,0,0,0.65)", color: "#fff" }}
+              className="absolute bottom-2 right-2 text-[11px] font-semibold px-2 py-1 rounded flex items-center gap-1"
+            >
+              <Camera size={12} /> +{entry.extraCount} more
+            </button>
+          )}
           {/* Stage + what happened, laid over the top of the photos */}
           <div
             style={{ background: "linear-gradient(180deg, rgba(10,20,32,0.85) 0%, rgba(10,20,32,0.55) 65%, transparent 100%)", pointerEvents: "none" }}
@@ -1128,6 +1206,7 @@ function ProgressCard({ entry, onRecheck }) {
 
       <div className="flex items-center gap-2 flex-wrap mb-1 pr-16">
         <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-xs">{entry.date}</span>
+        {entry.source === "whatsapp" && <span style={{ color: C.green, border: `1px solid ${C.green}` }} className="text-[10px] font-semibold rounded px-1.5 py-0.5">via WhatsApp</span>}
         {entry.flag === "Checking" && (
           <span style={{ color: C.concrete }} className="text-xs inline-flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> AI is reviewing…</span>
         )}
@@ -1140,6 +1219,7 @@ function ProgressCard({ entry, onRecheck }) {
         </>
       )}
       {entry.workersCount && <div style={{ color: C.concrete }} className="text-xs mt-1">{entry.workersCount} workers on site</div>}
+      {entry.reportedBy && <div style={{ color: C.concrete }} className="text-xs mt-1">Reported by {entry.reportedBy}</div>}
       {entry.flagReason && (
         <div style={{ borderLeft: `3px solid ${fs?.color || C.concrete}`, background: "#fff", color: C.ink }} className="mt-2 text-xs px-2.5 py-1.5 rounded-r">
           <span className="font-semibold inline-flex items-center gap-1"><Sparkles size={11} /> AI:</span> {entry.flagReason}
@@ -1149,6 +1229,22 @@ function ProgressCard({ entry, onRecheck }) {
         <button onClick={() => onRecheck(entry, photos)} style={{ color: C.navy }} className="text-xs underline mt-2">
           {entry.flagReason ? "Re-check with AI" : "Check with AI"}
         </button>
+      )}
+      {showAll && (
+        <Modal title={`${entry.date} — ${entry.stage}`} onClose={() => setShowAll(false)} size="large">
+          <p style={{ color: C.concrete }} className="text-xs mb-3">The photos AI picked as useful for this day. Tap one to open it full size.</p>
+          <div className="grid gap-2 grid-cols-2 sm:grid-cols-3">
+            {[
+              ...PHOTO_SLOTS.filter((sl) => photos?.[sl.key]).map((sl) => ({ label: sl.label, data: photos[sl.key] })),
+              ...(photos?.extra || []).map((d, k) => ({ label: `Photo ${k + 1}`, data: d })),
+            ].map((ph, k) => (
+              <button key={k} type="button" onClick={() => setPreview({ name: `${entry.date} — ${entry.stage} — ${ph.label}`, mimeType: "image/jpeg", data: ph.data })} className="relative block">
+                <img src={`data:image/jpeg;base64,${ph.data}`} alt={ph.label} className="w-full rounded object-cover" style={{ height: 160 }} />
+                <span style={{ background: "rgba(0,0,0,0.55)", color: "#fff" }} className="absolute bottom-1.5 left-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded">{ph.label}</span>
+              </button>
+            ))}
+          </div>
+        </Modal>
       )}
       {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
@@ -1224,8 +1320,14 @@ function parsePlanReport(out) {
       .filter((l) => l && !/^nothing noted\.?$/i.test(l));
     sections.push({ title: h, points });
   });
+  const pg = text.match(/PROGRESS:\s*(\d{1,3})/i);
+  const cs = text.match(/CURRENT STAGE:\s*(.+)/i);
+  const nm = text.match(/NEXT MILESTONE:\s*(.+)/i);
   return {
     verdict,
+    progressPct: pg ? Math.max(0, Math.min(100, Number(pg[1]))) : null,
+    currentStage: cs ? cs[1].trim() : "",
+    nextMilestone: nm ? nm[1].trim() : "",
     summary: sm ? sm[1].trim() : "",
     sections,
     // If the AI ignored the format, keep the raw text so nothing is lost.
@@ -1256,6 +1358,19 @@ function PlanReport({ report }) {
           Checked {when} · {report.entryCount} log {report.entryCount === 1 ? "entry" : "entries"} · {report.photoCount} photos reviewed
         </span>
       </div>
+      {report.progressPct !== null && report.progressPct !== undefined && (
+        <div className="mb-3">
+          <div className="flex items-baseline gap-2 flex-wrap text-xs mb-1" style={{ color: C.concrete }}>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.ink }} className="text-base font-semibold">{report.progressPct}%</span>
+            <span>built (AI estimate)</span>
+            {report.currentStage && <span>· now at: <b style={{ color: C.ink }}>{report.currentStage}</b></span>}
+            {report.nextMilestone && <span>· next: <b style={{ color: C.ink }}>{report.nextMilestone}</b></span>}
+          </div>
+          <div style={{ background: C.paperDark, height: 6 }} className="rounded-full overflow-hidden">
+            <div style={{ width: `${report.progressPct}%`, background: vs.color, height: "100%" }} />
+          </div>
+        </div>
+      )}
       {report.summary && (
         <p style={{ color: C.ink }} className="text-sm mb-3 flex gap-1.5">
           <Sparkles size={14} className="shrink-0 mt-0.5" /> <span>{report.summary}</span>
@@ -1284,7 +1399,494 @@ function PlanReport({ report }) {
   );
 }
 
-function ProgressTab({ progress, setProgress, meta, setMeta }) {
+/* ---------------------------------------------------------------------- */
+/*  Import daily progress from a WhatsApp group export                      */
+/* ---------------------------------------------------------------------- */
+const blobToBase64Jpeg = (blob, maxWidth, quality) => compressImage(blob, maxWidth, quality);
+
+// Match a WhatsApp sender (a saved name, a "~pushname", or a phone number)
+// to someone in the People tab — by phone number first, then by name.
+const last10 = (s) => String(s || "").replace(/\D/g, "").slice(-10);
+function matchContact(sender, contacts) {
+  const digits = last10(sender);
+  if (digits.length === 10) {
+    const byPhone = contacts.find((c) => last10(c.phone) === digits);
+    if (byPhone) return byPhone;
+  }
+  const words = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 1);
+  const sw = words(sender);
+  if (!sw.length) return null;
+  return (
+    contacts.find((c) => {
+      const cw = words(c.name);
+      if (!cw.length) return false;
+      const [short, long] = sw.length <= cw.length ? [sw, cw] : [cw, sw];
+      return short.every((w) => long.includes(w));
+    }) || null
+  );
+}
+const senderLabel = (sender, contacts) => {
+  const c = matchContact(sender, contacts);
+  return c ? `${c.name} (${c.role})` : sender;
+};
+
+const MAX_KEEP_EXTRA = 4; // besides start + end, keep at most this many "useful" photos per day
+const MAX_THUMBS = 16;    // how many photos per day the AI looks at
+
+// Pick which of a day's photos the AI should look at: all of them if there
+// are few, otherwise an even spread that always includes the first and last.
+function sampleEvenly(list, n) {
+  if (list.length <= n) return list.map((x, i) => i);
+  const out = new Set([0, list.length - 1]);
+  for (let k = 1; out.size < n; k++) out.add(Math.round((k * (list.length - 1)) / (n - 1)));
+  return [...out].sort((a, b) => a - b).slice(0, n);
+}
+
+async function summariseWhatsAppDay(day, thumbs, contacts = []) {
+  // thumbs: [{ data, time, sender }] — small numbered previews of the day's photos
+  const chat = day.messages
+    .map((m) => `${m.time} ${senderLabel(m.sender, contacts)}: ${m.text || (m.photos.length ? `[${m.photos.length} photo${m.photos.length > 1 ? "s" : ""}]` : "")}`)
+    .join("\n")
+    .slice(0, 5000);
+  const photoList = thumbs.map((t, i) => `Photo ${i + 1}: sent ${t.time} by ${senderLabel(t.sender, contacts)}`).join("\n");
+  const text = `These are one day's messages (${day.date}) from a WhatsApp group for a house construction site in Bangalore, India (homeowner, builder, site engineer). Where known, each sender's role is shown in brackets — give more weight to the site engineer's and builder's updates.
+
+Messages:
+${chat}
+
+${thumbs.length ? `${thumbs.length} photo(s) from the day are attached in this order:\n${photoList}` : "No photos."}
+
+Turn this into ONE daily progress log entry AND choose which photos are worth keeping. Reply with ONLY a JSON object:
+{"relevant": true/false, "stage": "...", "description": "...", "workersCount": "", "start": null, "end": null, "keep": [], "skipped": ""}
+- "relevant": false if the day has no real site progress (just greetings, "ok", payments chat etc.).
+- "stage": exactly one of: ${STAGES.join(", ")}.
+- "description": 1-3 short sentences on what work happened and any instructions or issues raised (e.g. "Builder asked for caution tape"). Plain English, no names needed.
+- "workersCount": number of workers if stated or clearly countable in photos, else "".
+- "start": the photo number that best shows the site at the START of the day's work (usually an early photo), or null if no useful photo.
+- "end": the photo number that best shows the RESULT at the end of the day (usually a late photo, different from start), or null if only one useful photo.
+- "keep": up to ${MAX_KEEP_EXTRA} OTHER photo numbers that add real information — a different area of work, a close-up of workmanship or material brands, a safety or quality problem, a delivery. Leave it empty if nothing adds value.
+- Do NOT pick: near-duplicates of an already-chosen photo, blurry/dark/accidental shots, selfies or people posing, screenshots, forwarded images, memes, or photos of unrelated places.
+- "skipped": a very short reason for the ones you left out, e.g. "6 near-duplicates, 1 blurry".`;
+  const out = await askClaude({ text, images: thumbs.map((t) => ({ data: t.data, mimeType: "image/jpeg" })) });
+  const r = parseJsonLoose(out);
+  const valid = (n) => Number.isInteger(Number(n)) && Number(n) >= 1 && Number(n) <= thumbs.length ? Number(n) - 1 : null;
+  const start = valid(r.start);
+  let end = valid(r.end);
+  if (end === start) end = null;
+  const keep = [...new Set((Array.isArray(r.keep) ? r.keep : []).map(valid).filter((x) => x !== null && x !== start && x !== end))].slice(0, MAX_KEEP_EXTRA);
+  return {
+    relevant: r.relevant !== false,
+    stage: STAGES.includes(r.stage) ? r.stage : "Other",
+    description: String(r.description || "").trim(),
+    workersCount: r.workersCount ? String(r.workersCount).replace(/[^0-9]/g, "") : "",
+    pick: { start, end, keep },
+    skipped: String(r.skipped || "").trim(),
+  };
+}
+
+function WhatsAppImport({ progress, onImport, contacts = [], setContacts }) {
+  const fileRef = useRef();
+  const stopRef = useRef(false);
+  const [step, setStep] = useState(null); // null | "choose" | "reading" | "review"
+  const [error, setError] = useState("");
+  const [data, setData] = useState(null); // { days, senders, getPhoto, hasMedia }
+  const [pickedSenders, setPickedSenders] = useState({});
+  const [pickedDays, setPickedDays] = useState({});
+  const [status, setStatus] = useState("");
+  const [drafts, setDrafts] = useState([]);
+  const [runChecks, setRunChecks] = useState(true);
+  const [importing, setImporting] = useState(false);
+
+  const importedDates = new Set(progress.filter((p) => p.source === "whatsapp").map((p) => p.date));
+  const close = () => { stopRef.current = true; setStep(null); setData(null); setDrafts([]); setError(""); };
+
+  const onPick = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setError("");
+    try {
+      const res = await readWhatsAppExport(file);
+      if (!res.messages.length) throw new Error("No messages found in that file.");
+      const days = groupByDay(res.messages);
+      const counts = {};
+      res.messages.forEach((m) => { counts[m.sender] = (counts[m.sender] || 0) + 1; });
+      const senders = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      setData({ days, senders, getPhoto: res.getPhoto, hasMedia: res.hasMedia });
+      setPickedSenders(Object.fromEntries(senders.map(([n]) => [n, true])));
+      setPickedDays(Object.fromEntries(days.map((d) => [d.date, !importedDates.has(d.date)])));
+      setStep("choose");
+    } catch (err) {
+      console.error("[SiteLedger] WhatsApp import failed", err);
+      setError(err.message || "Couldn't read that file.");
+    }
+  };
+
+  // Quick-add an unknown sender to People so they're recognised next time.
+  const addSenderToPeople = async (sender, role) => {
+    if (!role || !setContacts) return;
+    const isNumber = last10(sender).length === 10 && !/[a-z]/i.test(sender);
+    const next = [{ id: uid(), role, name: sender, phone: isNumber ? sender : "", notes: isNumber ? "Added from WhatsApp import — edit to add their name" : "Added from WhatsApp import" }, ...contacts];
+    setContacts(next);
+    await saveKey("contacts", next);
+  };
+
+  const daysForSenders = () =>
+    (data?.days || [])
+      .map((d) => ({ ...d, messages: d.messages.filter((m) => pickedSenders[m.sender]) }))
+      .filter((d) => d.messages.length);
+
+  const readDays = async () => {
+    const days = daysForSenders().filter((d) => pickedDays[d.date]);
+    if (!days.length) return;
+    stopRef.current = false;
+    setStep("reading");
+    const out = [];
+    for (let i = 0; i < days.length; i++) {
+      if (stopRef.current) break;
+      const day = days[i];
+      setStatus(`Reading ${day.date} (${i + 1} of ${days.length})…`);
+      // All photos posted that day, with who sent them and when.
+      const all = day.messages.flatMap((m) => m.photos.map((name) => ({ name, time: m.time, sender: m.sender })));
+      const sampled = sampleEvenly(all, MAX_THUMBS).map((idx) => all[idx]);
+      const thumbs = [];
+      for (const ph of sampled) {
+        const blob = await data.getPhoto(ph.name);
+        if (blob) thumbs.push({ ...ph, data: await blobToBase64Jpeg(blob, 480, 0.6) });
+      }
+      if (thumbs.length) setStatus(`Reading ${day.date} (${i + 1} of ${days.length}) — AI is sorting ${all.length} photo${all.length > 1 ? "s" : ""}…`);
+      let summary;
+      try {
+        summary = await summariseWhatsAppDay(day, thumbs, contacts);
+      } catch (err) {
+        const busy = /high demand|overloaded|try again later|\(429\)|\(503\)/i.test(err?.message || "");
+        summary = {
+          relevant: true, stage: "Other",
+          description: day.messages.map((m) => m.text).filter(Boolean).join(" · ").slice(0, 300), workersCount: "",
+          pick: { start: thumbs.length ? 0 : null, end: thumbs.length > 1 ? thumbs.length - 1 : null, keep: [] }, // fall back to first + last
+          failed: busy ? "AI busy — filled from the raw messages, first and last photo kept" : "AI couldn't read this day — filled from the raw messages, first and last photo kept",
+        };
+      }
+      // Load full-size versions of just the photos worth keeping.
+      const photos = { extra: [] };
+      const full = async (idx) => {
+        const blob = idx === null || idx === undefined ? null : await data.getPhoto(thumbs[idx].name);
+        return blob ? blobToBase64Jpeg(blob, 1200, 0.72) : null;
+      };
+      const st = await full(summary.pick.start);
+      const en = await full(summary.pick.end);
+      if (st) photos.start = st;
+      if (en) photos.end = en;
+      for (const k of summary.pick.keep) { const d = await full(k); if (d) photos.extra.push(d); }
+      const keptCount = (st ? 1 : 0) + (en ? 1 : 0) + photos.extra.length;
+      summary.photoNote = all.length ? `${all.length} photo${all.length > 1 ? "s" : ""} → kept ${keptCount}${summary.skipped ? ` (skipped: ${summary.skipped})` : all.length > keptCount ? ` (${all.length - keptCount} skipped)` : ""}${all.length > thumbs.length ? ` · AI looked at ${thumbs.length}` : ""}` : "";
+      const reporters = [...new Set(day.messages.map((m) => senderLabel(m.sender, contacts)))];
+      out.push({ date: day.date, ...summary, photos, include: summary.relevant, messageCount: day.messages.length, reportedBy: reporters.join(", ") });
+      setDrafts([...out]);
+      await new Promise((r) => setTimeout(r, 800)); // be gentle with the free AI quota
+    }
+    setStep("review");
+  };
+
+  const doImport = async () => {
+    setImporting(true);
+    await onImport(drafts.filter((d) => d.include), runChecks);
+    setImporting(false);
+    close();
+  };
+
+  const setDraft = (idx, patch) => setDrafts((ds) => ds.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+  const visibleDays = daysForSenders();
+  const selectedCount = visibleDays.filter((d) => pickedDays[d.date]).length;
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.line}`, boxShadow: "0 1px 2px rgba(32,36,42,0.05), 0 1px 1px rgba(32,36,42,0.04)" }} className="rounded-lg p-4 mb-6">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="uppercase text-sm font-semibold tracking-wide mb-1">
+            Import from WhatsApp
+          </h3>
+          <p style={{ color: C.concrete }} className="text-xs max-w-2xl">
+            In the site WhatsApp group: ⋮ → More → <b>Export chat</b> → <b>Include media</b>, then upload the zip here. AI turns each day's messages and photos into a daily log entry for you to review. Days already imported are skipped.
+          </p>
+        </div>
+        <input type="file" accept=".zip,.txt,application/zip,text/plain" ref={fileRef} className="hidden" onChange={onPick} />
+        <Btn tone="ghost" small onClick={() => fileRef.current.click()}>
+          <Upload size={14} /> Upload chat export
+        </Btn>
+      </div>
+      {error && <p style={{ color: C.red }} className="text-xs mt-2">{error}</p>}
+
+      {step && (
+        <Modal title="Import from WhatsApp" onClose={close} size="large">
+          {step === "choose" && data && (
+            <div>
+              {!data.hasMedia && (
+                <p style={{ color: C.yellow }} className="text-xs mb-3">No photos in this export — choose “Include media” when exporting to bring the photos in too.</p>
+              )}
+              <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mb-1">Whose messages count as progress?</div>
+              <p style={{ color: C.concrete }} className="text-xs mb-2">Matched to your People list by phone number or name. Add anyone unknown so the AI knows their role.</p>
+              <div className="grid gap-2 sm:grid-cols-2 mb-4">
+                {data.senders.map(([name, n]) => {
+                  const c = matchContact(name, contacts);
+                  return (
+                    <div key={name} style={{ background: "#fff", border: `1px solid ${c ? C.green : C.line}` }} className="text-xs rounded-md px-3 py-2 flex items-center gap-2 flex-wrap">
+                      <label className="flex items-center gap-1.5 min-w-0">
+                        <input type="checkbox" checked={!!pickedSenders[name]} onChange={(e) => setPickedSenders({ ...pickedSenders, [name]: e.target.checked })} />
+                        <span className="font-semibold truncate">{name}</span>
+                        <span style={{ color: C.concrete }}>({n})</span>
+                      </label>
+                      {c ? (
+                        <span style={{ color: C.green }} className="ml-auto flex items-center gap-1 font-semibold">
+                          <CheckCircle2 size={12} /> {c.role}{c.name.toLowerCase() !== name.toLowerCase() ? ` · ${c.name}` : ""}
+                        </span>
+                      ) : setContacts ? (
+                        <select
+                          defaultValue=""
+                          onChange={(e) => addSenderToPeople(name, e.target.value)}
+                          style={{ ...inputStyle, width: "auto", padding: "3px 6px", fontSize: 11 }}
+                          className="ml-auto"
+                        >
+                          <option value="">Not in People — add as…</option>
+                          {contactSchema[0].options.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      ) : (
+                        <span style={{ color: C.concrete }} className="ml-auto">not in People</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between mb-1">
+                <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide">Days to import</div>
+                <div className="flex gap-3 text-xs">
+                  <button onClick={() => setPickedDays(Object.fromEntries(visibleDays.map((d) => [d.date, !importedDates.has(d.date)])))} style={{ color: C.navy }} className="underline">New days only</button>
+                  <button onClick={() => setPickedDays(Object.fromEntries(visibleDays.map((d) => [d.date, false])))} style={{ color: C.navy }} className="underline">None</button>
+                </div>
+              </div>
+              <div className="grid gap-1.5 sm:grid-cols-2 mb-4" style={{ maxHeight: 320, overflowY: "auto" }}>
+                {[...visibleDays].reverse().map((d) => {
+                  const photos = d.messages.reduce((n, m) => n + m.photos.length, 0);
+                  return (
+                    <label key={d.date} style={{ background: "#fff", border: `1px solid ${C.line}` }} className="rounded-md px-3 py-2 text-xs flex items-center gap-2">
+                      <input type="checkbox" checked={!!pickedDays[d.date]} onChange={(e) => setPickedDays({ ...pickedDays, [d.date]: e.target.checked })} />
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</span>
+                      <span style={{ color: C.concrete }}>{d.messages.length} msgs · {photos} photos</span>
+                      {importedDates.has(d.date) && <span style={{ color: C.green }} className="ml-auto font-semibold">imported</span>}
+                    </label>
+                  );
+                })}
+              </div>
+              <Btn onClick={readDays} disabled={!selectedCount}>
+                <Sparkles size={15} /> Read {selectedCount} {selectedCount === 1 ? "day" : "days"} with AI
+              </Btn>
+              {selectedCount > 15 && <p style={{ color: C.concrete }} className="text-xs mt-2">Tip: many days can take a few minutes. You can review what's done so far at any time.</p>}
+            </div>
+          )}
+
+          {(step === "reading" || step === "review") && (
+            <div>
+              {step === "reading" && (
+                <div className="flex items-center gap-3 mb-3 flex-wrap">
+                  <span style={{ color: C.ink }} className="text-sm flex items-center gap-2"><Loader2 size={15} className="animate-spin" /> {status}</span>
+                  <button onClick={() => { stopRef.current = true; }} style={{ color: C.navy }} className="text-xs underline">Stop and review what's done</button>
+                </div>
+              )}
+              <div className="space-y-3 mb-4">
+                {drafts.map((d, idx) => (
+                  <div key={d.date} style={{ background: "#fff", border: `1px solid ${d.include ? C.green : C.line}`, opacity: d.include ? 1 : 0.65 }} className="rounded-md p-3">
+                    <div className="flex items-start gap-3 flex-wrap">
+                      <label className="flex items-center gap-2 text-xs font-semibold">
+                        <input type="checkbox" checked={d.include} onChange={(e) => setDraft(idx, { include: e.target.checked })} />
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</span>
+                      </label>
+                      <div className="flex gap-1.5">
+                        {PHOTO_SLOTS.filter((s) => d.photos[s.key]).map((s) => (
+                          <div key={s.key} className="relative">
+                            <img src={`data:image/jpeg;base64,${d.photos[s.key]}`} alt={s.label} title={s.label} className="rounded object-cover" style={{ width: 56, height: 56 }} />
+                            <span style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }} className="absolute bottom-0.5 left-0.5 text-[9px] px-1 rounded">{s.key === "start" ? "Start" : "End"}</span>
+                          </div>
+                        ))}
+                        {(d.photos.extra || []).map((x, k) => (
+                          <div key={k} className="relative">
+                            <img src={`data:image/jpeg;base64,${x}`} alt="Useful photo" className="rounded object-cover" style={{ width: 56, height: 56 }} />
+                            <span style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }} className="absolute bottom-0.5 left-0.5 text-[9px] px-1 rounded">+{k + 1}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex-1 min-w-[220px] grid gap-2 sm:grid-cols-3">
+                        <select style={{ ...inputStyle, padding: "6px 8px", fontSize: 13 }} value={d.stage} onChange={(e) => setDraft(idx, { stage: e.target.value })}>
+                          {STAGES.map((o) => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                        <input style={{ ...inputStyle, padding: "6px 8px", fontSize: 13 }} type="number" min="0" placeholder="Workers" value={d.workersCount} onChange={(e) => setDraft(idx, { workersCount: e.target.value })} />
+                        <span style={{ color: C.concrete }} className="text-xs self-center">{d.messageCount} messages{!d.relevant ? " · looks like chat only" : ""}</span>
+                        {d.reportedBy && <span style={{ color: C.concrete }} className="text-xs sm:col-span-3">From: {d.reportedBy}</span>}
+                        {d.photoNote && <span style={{ color: C.concrete }} className="text-xs sm:col-span-3 flex items-center gap-1"><Camera size={11} /> {d.photoNote}</span>}
+                        <textarea style={{ ...inputStyle, minHeight: 54, fontSize: 13 }} className="sm:col-span-3" value={d.description} onChange={(e) => setDraft(idx, { description: e.target.value })} />
+                      </div>
+                    </div>
+                    {d.failed && <p style={{ color: C.yellow }} className="text-xs mt-1">{d.failed}</p>}
+                  </div>
+                ))}
+              </div>
+              {step === "review" && (
+                <div className="flex items-center gap-4 flex-wrap">
+                  <Btn onClick={doImport} disabled={importing || !drafts.some((d) => d.include)}>
+                    {importing ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                    Import {drafts.filter((d) => d.include).length} {drafts.filter((d) => d.include).length === 1 ? "entry" : "entries"}
+                  </Btn>
+                  <label className="flex items-center gap-2 text-xs" style={{ color: C.ink }}>
+                    <input type="checkbox" checked={runChecks} onChange={(e) => setRunChecks(e.target.checked)} />
+                    Run the AI safety/flag check on each imported entry
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Compares the WHOLE daily log (text, AI flags, and as many site photos as
+// fit in one request) against the uploaded final plan. Used by the button
+// in the Progress tab and by the weekly scheduled check.
+async function runPlanCrossCheck({ meta, progress, onStep = () => {} }) {
+  const planFile = meta.planFile;
+  if (!planFile) throw new Error("Upload the final plan first.");
+  onStep("Gathering the daily log and photos…");
+  const entries = [...progress].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const log = entries
+    .map((p, i) => {
+      const photoNote = p.photoSlots?.length ? ` [photos: ${p.photoSlots.map((k) => (k === "start" ? "start of day" : "end of day")).join(" + ")}]` : "";
+      const aiNote = p.flagReason ? ` | Daily AI check: ${p.flag} — ${p.flagReason}` : "";
+      return `#${i + 1} ${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || "(no notes)"}${photoNote}${aiNote}`;
+    })
+    .join("\n");
+
+  // Request-size budget: the plan file goes first, then site photos from
+  // the most recent days backwards until the budget is used up.
+  const BUDGET = 3000000; // base64 characters, stays under the server's 4.5 MB upload limit
+  const PLAN_MAX = 1500000; // leave at least half the budget for site photos
+  const planMime = planFile.type || "application/octet-stream";
+  const planSendable = planMime.startsWith("image/") || planMime === "application/pdf";
+  const images = [];
+  let used = 0;
+  let planPages = 0; // >0 when a big PDF was turned into page images
+  let planTotalPages = 0;
+  if (planSendable) {
+    if (planMime === "application/pdf" && planFile.b64.length > PLAN_MAX) {
+      onStep("Plan PDF is large — preparing its pages…");
+      let res = await pdfToImages(planFile.b64);
+      let size = res.images.reduce((n, d) => n + d.length, 0);
+      if (size > PLAN_MAX) {
+        res = await pdfToImages(planFile.b64, { maxPages: 3, width: 1400, quality: 0.7 });
+        size = res.images.reduce((n, d) => n + d.length, 0);
+      }
+      res.images.forEach((data) => images.push({ data, mimeType: "image/jpeg" }));
+      used += size;
+      planPages = res.images.length;
+      planTotalPages = res.totalPages;
+    } else if (planMime.startsWith("image/") && planFile.b64.length > PLAN_MAX) {
+      const data = await shrinkBase64Image(planFile.b64, 1800, 0.75);
+      images.push({ data, mimeType: "image/jpeg" });
+      used += data.length;
+    } else {
+      images.push({ data: planFile.b64, mimeType: planMime });
+      used += planFile.b64.length;
+    }
+  }
+  const photoLabels = [];
+  for (const p of [...entries].reverse()) {
+    if (!p.photoSlots?.length) continue;
+    const pics = await loadKey(progressPhotoKey(p.id), null);
+    for (const slot of PHOTO_SLOTS) {
+      const data = pics?.[slot.key];
+      if (!data) continue;
+      if (used + data.length > BUDGET) break;
+      images.push({ data, mimeType: "image/jpeg" });
+      used += data.length;
+      photoLabels.push(`${p.date} ${p.stage} — ${slot.label.toLowerCase()}`);
+    }
+    if (used > BUDGET * 0.95) break;
+  }
+
+  onStep("AI is comparing the site against the plan…");
+  const planCount = planSendable ? Math.max(planPages, 1) : 0;
+  const attachList = [
+    !planSendable
+      ? "The plan file (" + planFile.name + ") could not be attached in this format — rely on the notes below."
+      : planPages
+      ? `Attachments 1-${planPages}: pages of the FINAL APPROVED PLAN (${planFile.name})${planTotalPages > planPages ? `, first ${planPages} of ${planTotalPages} pages` : ""}.`
+      : "Attachment 1: the FINAL APPROVED PLAN (" + planFile.name + ").",
+    ...photoLabels.map((l, i) => `Attachment ${i + planCount + 1}: site photo, ${l}.`),
+  ].join("\n");
+
+  const text = `You are an experienced, strict site engineer reviewing a house under construction in Bangalore, India, for the homeowner, who lives abroad and cannot visit. Compare EVERYTHING logged so far against the final approved plan.
+
+${attachList}
+
+Stages marked complete by the homeowner: ${(meta.completedStages || []).join(", ") || "none"}
+${meta.planText ? `Extra plan notes from the homeowner: ${meta.planText}\n` : ""}Today's date: ${today()}
+
+Full daily progress log (oldest first):
+${log || "(no entries yet)"}
+
+Check carefully:
+- Does the work in the photos match the plan (layout, dimensions you can judge, setbacks, number of floors, room positions, materials)?
+- Is the work in the right sequence, and are any stages behind the plan's timeline?
+- Do the log notes match what the photos actually show (including dates printed on photos)?
+- Safety and workmanship problems visible in photos.
+- Gaps: days with no entries, stages logged with no photos, anything missing you'd want evidence for.
+
+Reply in EXACTLY this format, plain text, no markdown symbols other than "- " bullets:
+VERDICT: ON TRACK or WATCH or RED FLAG
+PROGRESS: a single number 0-100 = your estimate of how much of the WHOLE house (as per the plan) is built so far, judged from the log and photos
+CURRENT STAGE: the stage work is at now, in a few words
+NEXT MILESTONE: the next big milestone to watch for, in a few words
+SUMMARY: two or three sentences a homeowner can understand.
+MATCHES PLAN:
+- point
+DOESN'T MATCH / BEHIND:
+- point (mention the log date)
+SAFETY & QUALITY:
+- point
+ASK THE BUILDER:
+- question
+Keep every point short and specific. Write "- Nothing noted" under a heading if there is nothing.`;
+
+  const out = await askClaude({ text, images });
+  return { ...parsePlanReport(out), checkedAt: new Date().toISOString(), entryCount: entries.length, photoCount: photoLabels.length };
+}
+
+// Weekly schedule: the check is "due" once the chosen weekday has arrived
+// and no check has run since then. It runs the next time anyone opens the app.
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function lastScheduledDate(day, now = new Date()) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() - day + 7) % 7));
+  return d;
+}
+function planCheckDue(meta) {
+  const day = meta?.planSchedule?.day;
+  if (day === undefined || day === null || day === "" || !meta.planFile) return false;
+  const running = meta.planReviewRunning && Date.now() - new Date(meta.planReviewRunning).getTime() < 15 * 60 * 1000;
+  if (running) return false;
+  const last = meta.planReview?.checkedAt ? new Date(meta.planReview.checkedAt) : null;
+  return !last || last < lastScheduledDate(Number(day));
+}
+function nextPlanCheckLabel(meta) {
+  const day = meta?.planSchedule?.day;
+  if (day === undefined || day === null || day === "") return "";
+  if (planCheckDue(meta)) return "due now — runs next time the app is opened";
+  const next = lastScheduledDate(Number(day));
+  next.setDate(next.getDate() + 7);
+  return next.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
+}
+
+function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setContacts }) {
   const [planFile, setPlanFile] = useState(meta.planFile || null);
   const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -1332,9 +1934,34 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
     runReview(entry, photos);
   };
 
+  // Adds entries built from a WhatsApp export, newest first, then (optionally)
+  // runs the usual AI flag check on each one in the background.
+  const importFromWhatsApp = async (drafts, runChecks) => {
+    const entries = [];
+    for (const d of drafts) {
+      const id = uid();
+      const photoSlots = PHOTO_SLOTS.filter((s) => d.photos[s.key]).map((s) => s.key);
+      const extraCount = (d.photos.extra || []).length;
+      if (photoSlots.length || extraCount) await saveKey(progressPhotoKey(id), d.photos);
+      entries.push({ id, date: d.date, extraCount, stage: d.stage, workersCount: d.workersCount, description: d.description, photoSlots, flag: runChecks ? "Checking" : "", flagReason: "", source: "whatsapp", reportedBy: d.reportedBy || "" });
+    }
+    const next = [...entries, ...progressRef.current].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    progressRef.current = next;
+    setProgress(next);
+    await saveKey("progress", next);
+    if (runChecks) {
+      for (const e of entries) {
+        await runReview(e, drafts.find((d) => d.date === e.date)?.photos);
+      }
+    }
+  };
+
   const saveEdit = (initial, updateItem) => async (vals, photos) => {
     const photoSlots = PHOTO_SLOTS.filter((s) => photos[s.key]).map((s) => s.key);
-    if (photoSlots.length) await saveKey(progressPhotoKey(initial.id), photos);
+    // Keep any extra photos from a WhatsApp import — the edit form only shows start/end.
+    const existing = initial.extraCount ? await loadKey(progressPhotoKey(initial.id), null) : null;
+    const extra = existing?.extra || [];
+    if (photoSlots.length || extra.length) await saveKey(progressPhotoKey(initial.id), { ...photos, extra });
     else if (initial.photoSlots?.length) await saveKey(progressPhotoKey(initial.id), null);
     const entry = { ...initial, ...vals, photoSlots };
     const next = await updateItem(initial.id, { ...vals, photoSlots });
@@ -1372,115 +1999,13 @@ function ProgressTab({ progress, setProgress, meta, setMeta }) {
     await saveKey("meta", next);
   };
 
-  // Compares the WHOLE daily log (text, AI flags, and as many site photos as
-  // fit in one request) against the uploaded final plan, and saves the
-  // report so everyone on the project sees the latest one.
   const crossCheck = async () => {
     if (!planFile) return;
     setChecking(true);
     setCheckError("");
     try {
-      setCheckStep("Gathering the daily log and photos…");
-      const entries = [...progressRef.current].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-      const log = entries
-        .map((p, i) => {
-          const photoNote = p.photoSlots?.length ? ` [photos: ${p.photoSlots.map((k) => (k === "start" ? "start of day" : "end of day")).join(" + ")}]` : "";
-          const aiNote = p.flagReason ? ` | Daily AI check: ${p.flag} — ${p.flagReason}` : "";
-          return `#${i + 1} ${p.date} — ${p.stage} (${p.workersCount || "?"} workers): ${p.description || "(no notes)"}${photoNote}${aiNote}`;
-        })
-        .join("\n");
-
-      // Request-size budget: the plan file goes first, then site photos from
-      // the most recent days backwards until the budget is used up.
-      const BUDGET = 3000000; // base64 characters, stays under the server's 4.5 MB upload limit
-      const PLAN_MAX = 1500000; // leave at least half the budget for site photos
-      const planMime = planFile.type || "application/octet-stream";
-      const planSendable = planMime.startsWith("image/") || planMime === "application/pdf";
-      const images = [];
-      let used = 0;
-      let planPages = 0; // >0 when a big PDF was turned into page images
-      let planTotalPages = 0;
-      if (planSendable) {
-        if (planMime === "application/pdf" && planFile.b64.length > PLAN_MAX) {
-          setCheckStep("Plan PDF is large — preparing its pages…");
-          let res = await pdfToImages(planFile.b64);
-          let size = res.images.reduce((n, d) => n + d.length, 0);
-          if (size > PLAN_MAX) {
-            res = await pdfToImages(planFile.b64, { maxPages: 3, width: 1400, quality: 0.7 });
-            size = res.images.reduce((n, d) => n + d.length, 0);
-          }
-          res.images.forEach((data) => images.push({ data, mimeType: "image/jpeg" }));
-          used += size;
-          planPages = res.images.length;
-          planTotalPages = res.totalPages;
-        } else if (planMime.startsWith("image/") && planFile.b64.length > PLAN_MAX) {
-          const data = await shrinkBase64Image(planFile.b64, 1800, 0.75);
-          images.push({ data, mimeType: "image/jpeg" });
-          used += data.length;
-        } else {
-          images.push({ data: planFile.b64, mimeType: planMime });
-          used += planFile.b64.length;
-        }
-      }
-      const photoLabels = [];
-      for (const p of [...entries].reverse()) {
-        if (!p.photoSlots?.length) continue;
-        const pics = await loadKey(progressPhotoKey(p.id), null);
-        for (const slot of PHOTO_SLOTS) {
-          const data = pics?.[slot.key];
-          if (!data) continue;
-          if (used + data.length > BUDGET) break;
-          images.push({ data, mimeType: "image/jpeg" });
-          used += data.length;
-          photoLabels.push(`${p.date} ${p.stage} — ${slot.label.toLowerCase()}`);
-        }
-        if (used > BUDGET * 0.95) break;
-      }
-
-      setCheckStep("AI is comparing the site against the plan…");
-      const planCount = planSendable ? Math.max(planPages, 1) : 0;
-      const attachList = [
-        !planSendable
-          ? "The plan file (" + planFile.name + ") could not be attached in this format — rely on the notes below."
-          : planPages
-          ? `Attachments 1-${planPages}: pages of the FINAL APPROVED PLAN (${planFile.name})${planTotalPages > planPages ? `, first ${planPages} of ${planTotalPages} pages` : ""}.`
-          : "Attachment 1: the FINAL APPROVED PLAN (" + planFile.name + ").",
-        ...photoLabels.map((l, i) => `Attachment ${i + planCount + 1}: site photo, ${l}.`),
-      ].join("\n");
-
-      const text = `You are an experienced, strict site engineer reviewing a house under construction in Bangalore, India, for the homeowner, who lives abroad and cannot visit. Compare EVERYTHING logged so far against the final approved plan.
-
-${attachList}
-
-Stages marked complete by the homeowner: ${(meta.completedStages || []).join(", ") || "none"}
-${meta.planText ? `Extra plan notes from the homeowner: ${meta.planText}\n` : ""}Today's date: ${today()}
-
-Full daily progress log (oldest first):
-${log || "(no entries yet)"}
-
-Check carefully:
-- Does the work in the photos match the plan (layout, dimensions you can judge, setbacks, number of floors, room positions, materials)?
-- Is the work in the right sequence, and are any stages behind the plan's timeline?
-- Do the log notes match what the photos actually show (including dates printed on photos)?
-- Safety and workmanship problems visible in photos.
-- Gaps: days with no entries, stages logged with no photos, anything missing you'd want evidence for.
-
-Reply in EXACTLY this format, plain text, no markdown symbols other than "- " bullets:
-VERDICT: ON TRACK or WATCH or RED FLAG
-SUMMARY: two or three sentences a homeowner can understand.
-MATCHES PLAN:
-- point
-DOESN'T MATCH / BEHIND:
-- point (mention the log date)
-SAFETY & QUALITY:
-- point
-ASK THE BUILDER:
-- question
-Keep every point short and specific. Write "- Nothing noted" under a heading if there is nothing.`;
-
-      const out = await askClaude({ text, images });
-      const report = { ...parsePlanReport(out), checkedAt: new Date().toISOString(), entryCount: entries.length, photoCount: photoLabels.length };
-      const next = { ...meta, planReview: report };
+      const report = await runPlanCrossCheck({ meta, progress: progressRef.current, onStep: setCheckStep });
+      const next = { ...meta, planReview: report, planReviewRunning: null };
       setMeta(next);
       await saveKey("meta", next);
     } catch (e) {
@@ -1492,6 +2017,12 @@ Keep every point short and specific. Write "- Nothing noted" under a heading if 
     }
     setCheckStep("");
     setChecking(false);
+  };
+
+  const setScheduleDay = async (value) => {
+    const next = { ...meta, planSchedule: value === "" ? null : { day: Number(value) } };
+    setMeta(next);
+    await saveKey("meta", next);
   };
 
   return (
@@ -1564,9 +2095,27 @@ Keep every point short and specific. Write "- Nothing noted" under a heading if 
           {checking && <span style={{ color: C.concrete }} className="text-xs">{checkStep}</span>}
           {!planFile && <span style={{ color: C.concrete }} className="text-xs">Upload the final plan first.</span>}
         </div>
+        <div style={{ background: "#fff", border: `1px solid ${C.line}` }} className="mt-3 rounded-md px-3 py-2 flex items-center gap-2 flex-wrap text-xs">
+          <CalendarDays size={14} style={{ color: C.navy }} />
+          <span style={{ color: C.ink }} className="font-semibold">Weekly auto-check:</span>
+          <select
+            style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 12 }}
+            value={meta.planSchedule?.day ?? ""}
+            onChange={(e) => setScheduleDay(e.target.value)}
+            disabled={!planFile}
+          >
+            <option value="">Off</option>
+            {WEEKDAYS.map((d, i) => <option key={d} value={i}>Every {d}</option>)}
+          </select>
+          {meta.planSchedule && planFile && (
+            <span style={{ color: C.concrete }}>Next: {nextPlanCheckLabel(meta)}. Results also update the Dashboard.</span>
+          )}
+        </div>
         {checkError && <p style={{ color: C.red }} className="text-xs mt-2">{checkError}</p>}
         {meta.planReview && <PlanReport report={meta.planReview} />}
       </div>
+
+      <WhatsAppImport progress={progress} onImport={importFromWhatsApp} contacts={contacts} setContacts={setContacts} />
 
       <ListSection
         icon={Hammer}
@@ -1684,7 +2233,7 @@ function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, d
   // Progress photos live under their own keys — fetch them once.
   useEffect(() => {
     let alive = true;
-    const withPhotos = progress.filter((p) => p.photoSlots?.length && !progressPhotos[p.id]);
+    const withPhotos = progress.filter((p) => (p.photoSlots?.length || p.extraCount) && !progressPhotos[p.id]);
     if (!withPhotos.length) return;
     Promise.all(withPhotos.map((p) => loadKey(progressPhotoKey(p.id), null).then((ph) => [p.id, ph || {}]))).then((pairs) => {
       if (alive) setProgressPhotos((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
@@ -1701,6 +2250,10 @@ function GalleryTab({ gallery, setGallery, progress, expenses, loan, products, d
       const data = progressPhotos[p.id]?.[slot.key];
       tiles.push({ id: `p-${p.id}-${slot.key}`, section: "progress", date: p.date, title: `${p.stage} · ${slot.label}`, note: p.description, loading: !data, file: data ? { name: `${p.date} ${p.stage} ${slot.label}`, mimeType: "image/jpeg", data } : null });
     });
+    for (let k = 0; k < (p.extraCount || 0); k++) {
+      const data = progressPhotos[p.id]?.extra?.[k];
+      tiles.push({ id: `p-${p.id}-x${k}`, section: "progress", date: p.date, title: `${p.stage} · Photo ${k + 1}`, note: p.description, loading: !data, file: data ? { name: `${p.date} ${p.stage} photo ${k + 1}`, mimeType: "image/jpeg", data } : null });
+    }
   });
   if (canSeeTab("budget")) {
     expenses.forEach((e) => {
@@ -2374,9 +2927,32 @@ function PermissionsTab({ permissions, setPermissions }) {
 const contactSchema = [
   { key: "role", label: "Role", type: "select", options: ["Builder", "Civil Engineer", "Architect", "Electrician", "Plumber", "Painter", "Carpenter", "BBMP / Govt Contact", "Other"], required: true },
   { key: "name", label: "Name", type: "text", required: true },
-  { key: "phone", label: "Phone number", type: "tel", required: true },
+  { key: "phone", label: "Phone number", type: "tel" },
+  { key: "photo", label: "Photo (optional)", type: "file", accept: "image/*", maxWidth: 400 },
   { key: "notes", label: "Notes", type: "textarea" },
 ];
+
+// Round contact photo, or their initials if there's no photo.
+function ContactAvatar({ contact, size = 48 }) {
+  const [open, setOpen] = useState(false);
+  const p = contact.photo;
+  const initials = String(contact.name || "?").replace(/[^A-Za-z\s]/g, " ").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "#";
+  if (p?.data) {
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)} className="shrink-0">
+          <img src={`data:${p.mimeType};base64,${p.data}`} alt={contact.name} className="rounded-full object-cover" style={{ width: size, height: size, border: `2px solid ${C.line}` }} />
+        </button>
+        {open && <FilePreview file={{ ...p, name: contact.name }} onClose={() => setOpen(false)} />}
+      </>
+    );
+  }
+  return (
+    <div style={{ width: size, height: size, background: C.navyLight, color: "#fff", fontFamily: "'Oswald', sans-serif" }} className="rounded-full shrink-0 flex items-center justify-center font-semibold">
+      {initials}
+    </div>
+  );
+}
 
 function PeopleTab({ contacts, setContacts }) {
   return (
@@ -2390,18 +2966,25 @@ function PeopleTab({ contacts, setContacts }) {
       storageKey="contacts"
       addLabel="Add contact"
       renderCard={(c) => (
-        <div>
-          <div className="flex items-center justify-between mb-1 pr-16">
-            <Stamp tone="navy">{c.role}</Stamp>
+        <div className="flex gap-3">
+          <ContactAvatar contact={c} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between mb-1 pr-16">
+              <Stamp tone="navy">{c.role}</Stamp>
+            </div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm mt-1">{c.name}</div>
+            {c.phone ? (
+              <div className="flex items-center gap-2 mt-1">
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-sm">{c.phone}</span>
+                <a href={`tel:${c.phone.replace(/[^0-9+]/g, "")}`} style={{ color: C.rust }} className="inline-flex items-center gap-1 text-xs font-semibold">
+                  <Phone size={13} /> Call
+                </a>
+              </div>
+            ) : (
+              <div style={{ color: C.concrete }} className="text-xs mt-1 italic">No phone number yet — tap edit to add</div>
+            )}
+            {c.notes && <p style={{ color: C.ink, whiteSpace: "pre-wrap" }} className="text-sm mt-1">{c.notes}</p>}
           </div>
-          <div style={{ fontFamily: "'Oswald', sans-serif", color: C.ink }} className="font-semibold text-sm mt-1">{c.name}</div>
-          <div className="flex items-center gap-2 mt-1">
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.concrete }} className="text-sm">{c.phone}</span>
-            <a href={`tel:${c.phone}`} style={{ color: C.rust }} className="inline-flex items-center gap-1 text-xs font-semibold">
-              <Phone size={13} /> Call
-            </a>
-          </div>
-          {c.notes && <p style={{ color: C.ink }} className="text-sm mt-1">{c.notes}</p>}
         </div>
       )}
     />
@@ -2950,6 +3533,39 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
     })();
   }, []);
 
+  // Weekly scheduled plan cross-check. Runs quietly in the background when
+  // the chosen weekday has arrived and it hasn't run yet this week. A short
+  // "running" marker stops two people's apps from running it at once.
+  const [autoCheck, setAutoCheck] = useState(""); // "" | "running" | error text
+  useEffect(() => {
+    if (!loaded || !planCheckDue(meta)) return;
+    let cancelled = false;
+    (async () => {
+      // Re-read the latest saved settings first, in case someone else just ran it.
+      const fresh = await loadKey("meta", meta);
+      if (cancelled || !planCheckDue(fresh)) { if (!cancelled) setMeta(fresh); return; }
+      const locked = { ...fresh, planReviewRunning: new Date().toISOString() };
+      setMeta(locked);
+      await saveKey("meta", locked);
+      setAutoCheck("running");
+      try {
+        const latestProgress = await loadKey("progress", progress);
+        const report = await runPlanCrossCheck({ meta: locked, progress: latestProgress });
+        const done = { ...(await loadKey("meta", locked)), planReview: { ...report, scheduled: true }, planReviewRunning: null };
+        setMeta(done);
+        await saveKey("meta", done);
+        setAutoCheck("");
+      } catch (e) {
+        console.error("[SiteLedger] Scheduled plan check failed", e);
+        const cleared = { ...(await loadKey("meta", locked)), planReviewRunning: null };
+        setMeta(cleared);
+        await saveKey("meta", cleared);
+        setAutoCheck("The weekly plan check couldn't run just now (the AI may be busy). It will try again next time the app is opened.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loaded]);
+
   if (!loaded) {
     return (
       <div style={{ background: C.paper, minHeight: "100vh" }} className="flex items-center justify-center">
@@ -3025,8 +3641,8 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6">
-        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} />}
-        {tab === "progress" && <ProgressTab progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta} />}
+        {tab === "dashboard" && <Dashboard data={data} setTab={setTab} currentUser={currentUser} autoCheck={autoCheck} />}
+        {tab === "progress" && <ProgressTab progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta} contacts={contacts} setContacts={setContacts} />}
         {tab === "gallery" && (
           <GalleryTab
             gallery={gallery} setGallery={setGallery}
