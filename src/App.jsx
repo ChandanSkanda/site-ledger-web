@@ -1665,6 +1665,76 @@ Turn this into ONE daily progress log entry AND choose which photos are worth ke
   };
 }
 
+// Look through the chat for hiccups — problems, disagreements, changes to the
+// plan, delays, defects — and how they were sorted out. Text only (cheap), and
+// spans days, since a problem raised one day is often settled the next.
+async function findWhatsAppHiccups(days, contacts = [], existing = [], onStep = () => {}) {
+  const lines = [];
+  days.forEach((d) => d.messages.forEach((m) => {
+    const t = (m.text || "").trim();
+    if (t) lines.push({ date: d.date, line: `[${d.date} ${m.time}] ${senderLabel(m.sender, contacts)}: ${t.replace(/\s*\n\s*/g, " / ").slice(0, 1500)}` });
+  }));
+  if (!lines.length) return [];
+  // Split long chats into chunks of whole days.
+  const CHUNK = 60000;
+  const chunks = [];
+  let cur = [];
+  let size = 0;
+  for (const l of lines) {
+    if (size + l.line.length > CHUNK && cur.length && cur[cur.length - 1].date !== l.date) { chunks.push(cur); cur = []; size = 0; }
+    cur.push(l);
+    size += l.line.length + 1;
+  }
+  if (cur.length) chunks.push(cur);
+
+  const known = existing.slice(0, 60).map((i) => `- id ${i.id} (${i.date}, ${i.status || "Open"}): ${String(i.issue || "").slice(0, 200)}`).join("\n");
+  const found = [];
+  for (let c = 0; c < chunks.length; c++) {
+    onStep(chunks.length > 1 ? `Looking for hiccups (part ${c + 1} of ${chunks.length})…` : "Looking for hiccups in the conversation…");
+    const text = `These are messages from a WhatsApp group for a house being built in Bangalore, India. The homeowner lives abroad; the builder, site engineer and supervisor post updates. Each sender's role is in brackets where known.
+
+Find the HICCUPS: real problems or disputes the homeowner would want on record. Examples: a change from the approved plan or drawings (e.g. moving the sump, changing a room), the homeowner objecting or being unhappy, a mistake or defect, a quality or safety problem, a delay and its cause (rain, surveyor or workers not turning up, material not arriving), a shortage, a design clash discovered on site, cost or approval trouble.
+NOT hiccups: routine daily progress, normal deliveries, simple questions that were answered straight away (e.g. "Is the lift pit in block?" → "Yes, three sides block"), greetings, thanks, plans for the next day.
+
+A hiccup raised one day is often discussed or settled on a later day — combine those messages into ONE hiccup.
+
+Hiccups already logged by the homeowner (don't create these again — if one matches, give its id in "existingId"):
+${known || "(none)"}
+
+Messages:
+${chunks[c].map((l) => l.line).join("\n")}
+
+Reply with ONLY a JSON object:
+{"hiccups":[{"date":"YYYY-MM-DD","issue":"","stepsTaken":"","status":"Open","resolvedOn":"","raisedBy":"","existingId":""}]}
+- "date": the day the problem was first raised.
+- "issue": 1-2 plain-English sentences on what went wrong and why (e.g. "Builder proposed shifting the staircase because of a column clash; homeowner objected as it differs from the approved plan.").
+- "stepsTaken": what was decided or done about it, with dates (e.g. "12 Mar: site meeting with the architect — staircase stays as per plan; landing width reduced slightly."). "" if nothing yet.
+- "status": "Resolved" only if the messages clearly show it was settled, otherwise "Open".
+- "resolvedOn": date it was settled, or "".
+- "raisedBy": who raised it (name/role as shown).
+- "existingId": the id of a matching already-logged hiccup, or "".
+Return {"hiccups":[]} if there are none.`;
+    const out = await askClaude({ text });
+    let r;
+    try { r = parseJsonLoose(out); } catch { r = { hiccups: [] }; }
+    (Array.isArray(r.hiccups) ? r.hiccups : []).forEach((h) => {
+      const issue = String(h.issue || "").trim();
+      if (!issue) return;
+      found.push({
+        date: /^\d{4}-\d{2}-\d{2}$/.test(h.date) ? h.date : chunks[c][0].date,
+        issue,
+        stepsTaken: String(h.stepsTaken || "").trim(),
+        status: h.status === "Resolved" ? "Resolved" : "Open",
+        resolvedOn: /^\d{4}-\d{2}-\d{2}$/.test(h.resolvedOn) ? h.resolvedOn : "",
+        raisedBy: String(h.raisedBy || "").trim(),
+        existingId: existing.some((i) => i.id === h.existingId) ? h.existingId : "",
+      });
+    });
+    if (c < chunks.length - 1) await new Promise((r2) => setTimeout(r2, 800));
+  }
+  return found.sort((a, b) => a.date.localeCompare(b.date));
+}
+
 // Guess a document type from its file name (you can change it before importing).
 function guessDocType(name) {
   const n = name.toLowerCase();
@@ -1676,7 +1746,7 @@ function guessDocType(name) {
 }
 const DOC_SIZE_LIMIT = 8 * 1024 * 1024; // bigger files are skipped (too large to store here)
 
-function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages = STAGES, documents = [], lastImport, onUndo }) {
+function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages = STAGES, documents = [], issues = [], lastImport, onUndo }) {
   const fileRef = useRef();
   const stopRef = useRef(false);
   const [step, setStep] = useState(null); // null | "choose" | "reading" | "review"
@@ -1693,9 +1763,43 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
   const [drafts, setDrafts] = useState([]);
   const [runChecks, setRunChecks] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [hiccups, setHiccups] = useState([]);
+  const [findHiccups, setFindHiccups] = useState(true);
+  const [hiccupNote, setHiccupNote] = useState("");
 
   const importedDates = new Set(progress.filter((p) => p.source === "whatsapp").map((p) => p.date));
-  const close = () => { stopRef.current = true; setStep(null); setData(null); setDrafts([]); setError(""); };
+  const close = () => { stopRef.current = true; setStep(null); setData(null); setDrafts([]); setHiccups([]); setHiccupNote(""); setError(""); };
+
+  // Hiccups: read the whole conversation for the chosen days (every sender —
+  // the homeowner's own objections count too).
+  const scanHiccups = async (dates) => {
+    const set = new Set(dates);
+    const days = (data?.days || []).filter((d) => set.has(d.date));
+    setHiccupNote("");
+    try {
+      const found = await findWhatsAppHiccups(days, contacts, issues, setStatus);
+      // A match with something already logged is ticked only if the chat adds
+      // to it (a new status, or steps where there were none).
+      const addsInfo = (h) => {
+        const ex = issues.find((i) => i.id === h.existingId);
+        return !ex || h.status !== (ex.status || "Open") || (h.stepsTaken && !ex.stepsTaken);
+      };
+      setHiccups(found.map((h, i) => ({ ...h, key: i, include: !h.existingId || addsInfo(h) })));
+      setHiccupNote(found.length ? "" : "No hiccups found in these days.");
+    } catch (err) {
+      console.error("[SiteLedger] Hiccup scan failed", err);
+      setHiccupNote(`Couldn't look for hiccups: ${err.message || "AI error"}. You can still import the log entries.`);
+    }
+  };
+  const hiccupsOnly = async () => {
+    stopRef.current = false;
+    setDrafts([]);
+    setStep("reading");
+    await scanHiccups(visibleDays.filter((d) => pickedDays[d.date]).map((d) => d.date).concat(
+      selectedCount ? [] : (data?.days || []).map((d) => d.date)
+    ));
+    setStep("review");
+  };
 
   const onPick = async (e) => {
     const file = e.target.files[0];
@@ -1798,6 +1902,7 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
       setDrafts([...out]);
       await new Promise((r) => setTimeout(r, 800)); // be gentle with the free AI quota
     }
+    if (findHiccups && !stopRef.current) await scanHiccups(days.map((d) => d.date));
     setStep("review");
   };
 
@@ -1815,7 +1920,7 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
   const doImport = async () => {
     setImporting(true);
     const docs = await readDocs();
-    await onImport(drafts.filter((d) => d.include), runChecks, docs);
+    await onImport(drafts.filter((d) => d.include), runChecks, docs, hiccups.filter((h) => h.include));
     setImporting(false);
     close();
   };
@@ -1827,6 +1932,8 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
     close();
   };
 
+  const setHiccup = (key, patch) => setHiccups((hs) => hs.map((h) => (h.key === key ? { ...h, ...patch } : h)));
+  const pickedHiccups = hiccups.filter((h) => h.include).length;
   const setDraft = (idx, patch) => setDrafts((ds) => ds.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
   const visibleDays = daysForSenders();
   const selectedCount = visibleDays.filter((d) => pickedDays[d.date]).length;
@@ -1849,9 +1956,9 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
           </Btn>
         </div>
       </div>
-      {lastImport && (lastImport.entryIds?.length || lastImport.docIds?.length) ? (
+      {lastImport && (lastImport.entryIds?.length || lastImport.docIds?.length || lastImport.issueIds?.length || lastImport.issueUpdates?.length) ? (
         <p style={{ color: C.concrete }} className="text-xs mt-2">
-          Last import: {new Date(lastImport.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} — {lastImport.entryIds?.length || 0} log entries, {lastImport.docIds?.length || 0} documents.{" "}
+          Last import: {new Date(lastImport.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} — {lastImport.entryIds?.length || 0} log entries, {lastImport.docIds?.length || 0} documents{lastImport.issueIds?.length || lastImport.issueUpdates?.length ? `, ${(lastImport.issueIds?.length || 0) + (lastImport.issueUpdates?.length || 0)} hiccups` : ""}.{" "}
           <button onClick={onUndo} style={{ color: C.red }} className="underline">Undo last import</button>
         </p>
       ) : null}
@@ -1964,12 +2071,19 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
                 <Btn onClick={readDays} disabled={!selectedCount}>
                   <Sparkles size={15} /> Read {selectedCount} {selectedCount === 1 ? "day" : "days"} with AI
                 </Btn>
+                <Btn tone="ghost" onClick={hiccupsOnly}>
+                  <AlertTriangle size={14} /> Find hiccups only
+                </Btn>
                 {selectedDocs().length > 0 && (
                   <Btn tone="ghost" onClick={importDocsOnly} disabled={importing}>
                     {importing ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Save {selectedDocs().length} {selectedDocs().length === 1 ? "document" : "documents"} only
                   </Btn>
                 )}
               </div>
+              <label className="flex items-start gap-2 text-xs mt-3" style={{ color: C.ink }}>
+                <input type="checkbox" className="mt-0.5" checked={findHiccups} onChange={(e) => setFindHiccups(e.target.checked)} />
+                <span>Also look for <b>hiccups</b> — plan changes, objections, delays, defects — and add them to the Issues tab. <b>Find hiccups only</b> checks the ticked days (or the whole chat if none are ticked) without creating log entries — handy for days you've already imported.</span>
+              </label>
               <p style={{ color: C.concrete }} className="text-xs mt-2">Nothing is saved until you press Import at the end — you can close this window at any time.</p>
               {selectedCount > 15 && <p style={{ color: C.concrete }} className="text-xs mt-2">Tip: many days can take a few minutes. You can review what's done so far at any time.</p>}
             </div>
@@ -2026,17 +2140,55 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
                   </div>
                 ))}
               </div>
+              {(hiccups.length > 0 || hiccupNote) && (
+                <div className="mb-4">
+                  <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mb-1 flex items-center gap-1.5">
+                    <AlertTriangle size={13} /> Hiccups found → Issues tab
+                  </div>
+                  {hiccupNote && <p style={{ color: C.concrete }} className="text-xs mb-2">{hiccupNote}</p>}
+                  <div className="space-y-2">
+                    {hiccups.map((h) => {
+                      const ex = h.existingId ? issues.find((i) => i.id === h.existingId) : null;
+                      return (
+                        <div key={h.key} style={{ background: "#fff", border: `1px solid ${h.include ? C.yellow : C.line}`, opacity: h.include ? 1 : 0.7 }} className="rounded-md p-3">
+                          <div className="flex items-center gap-2 flex-wrap mb-2 text-xs">
+                            <label className="flex items-center gap-2 font-semibold">
+                              <input type="checkbox" checked={h.include} onChange={(e) => setHiccup(h.key, { include: e.target.checked })} />
+                              <input type="date" value={h.date} onChange={(e) => setHiccup(h.key, { date: e.target.value })} style={{ ...inputStyle, width: "auto", padding: "3px 6px", fontSize: 12 }} />
+                            </label>
+                            <select value={h.status} onChange={(e) => setHiccup(h.key, { status: e.target.value })} style={{ ...inputStyle, width: "auto", padding: "3px 6px", fontSize: 12 }}>
+                              <option>Open</option>
+                              <option>Resolved</option>
+                            </select>
+                            {h.raisedBy && <span style={{ color: C.concrete }}>Raised by {h.raisedBy}</span>}
+                            {ex && (
+                              <span style={{ color: C.green }} className="font-semibold">
+                                Already in Issues ({ex.date}){h.include ? " — will update its steps and status" : " — skipped"}
+                              </span>
+                            )}
+                          </div>
+                          <textarea style={{ ...inputStyle, minHeight: 48, fontSize: 13 }} value={h.issue} onChange={(e) => setHiccup(h.key, { issue: e.target.value })} placeholder="What went wrong" />
+                          <textarea style={{ ...inputStyle, minHeight: 40, fontSize: 13, marginTop: 6 }} value={h.stepsTaken} onChange={(e) => setHiccup(h.key, { stepsTaken: e.target.value })} placeholder="Steps taken to resolve" />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {step === "review" && (
                 <div className="flex items-center gap-4 flex-wrap">
                   {selectedDocs().length > 0 && <span style={{ color: C.concrete }} className="text-xs w-full">Also saving {selectedDocs().length} document(s) to Documents.</span>}
-                  <Btn onClick={doImport} disabled={importing || (!drafts.some((d) => d.include) && !selectedDocs().length)}>
+                  <Btn onClick={doImport} disabled={importing || (!drafts.some((d) => d.include) && !selectedDocs().length && !pickedHiccups)}>
                     {importing ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                    Import {drafts.filter((d) => d.include).length} {drafts.filter((d) => d.include).length === 1 ? "entry" : "entries"}
+                    Import {[
+                      drafts.length ? `${drafts.filter((d) => d.include).length} ${drafts.filter((d) => d.include).length === 1 ? "entry" : "entries"}` : "",
+                      pickedHiccups ? `${pickedHiccups} ${pickedHiccups === 1 ? "hiccup" : "hiccups"}` : "",
+                    ].filter(Boolean).join(" + ") || "nothing"}
                   </Btn>
-                  <label className="flex items-center gap-2 text-xs" style={{ color: C.ink }}>
+                  {drafts.length > 0 && <label className="flex items-center gap-2 text-xs" style={{ color: C.ink }}>
                     <input type="checkbox" checked={runChecks} onChange={(e) => setRunChecks(e.target.checked)} />
                     Run the AI safety/flag check on each imported entry
-                  </label>
+                  </label>}
                 </div>
               )}
             </div>
@@ -2184,7 +2336,51 @@ function nextPlanCheckLabel(meta) {
   return next.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
 }
 
-function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setContacts, documents = [], setDocuments, currentUser }) {
+// Confirm box for wiping the daily log (all entries, or only the filtered ones).
+function DeleteEntriesDialog({ total, shown, onCancel, onDelete }) {
+  const [scope, setScope] = useState(shown ? "shown" : "all");
+  const [resetAuto, setResetAuto] = useState(true);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const count = scope === "shown" ? shown : total;
+  const ok = scope === "shown" || typed.trim().toUpperCase() === "DELETE";
+  return (
+    <Modal title="Delete log entries" onClose={onCancel}>
+      {shown > 0 && (
+        <div className="space-y-1.5 mb-3 text-sm" style={{ color: C.ink }}>
+          <label className="flex items-center gap-2"><input type="radio" checked={scope === "shown"} onChange={() => setScope("shown")} /> Only the {shown} {shown === 1 ? "entry" : "entries"} matching the current filter</label>
+          <label className="flex items-center gap-2"><input type="radio" checked={scope === "all"} onChange={() => setScope("all")} /> All {total} entries</label>
+        </div>
+      )}
+      <p style={{ color: C.ink }} className="text-sm mb-3">
+        This permanently deletes <b>{count} log {count === 1 ? "entry" : "entries"}</b> and their photos. Documents, hiccups and expenses are not touched. It can't be undone — use <b>Export CSV</b> first if you want a copy of the notes.
+      </p>
+      <label className="flex items-start gap-2 text-sm mb-3" style={{ color: C.ink }}>
+        <input type="checkbox" className="mt-1" checked={resetAuto} onChange={(e) => setResetAuto(e.target.checked)} />
+        <span>Also clear stage ticks the AI made from these entries (stages you ticked yourself are kept)</span>
+      </label>
+      {scope === "all" && (
+        <Field label='Type DELETE to confirm'>
+          <input style={inputStyle} value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="DELETE" autoFocus />
+        </Field>
+      )}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={!ok || busy || !count}
+          onClick={async () => { setBusy(true); await onDelete(scope, resetAuto); setBusy(false); }}
+          style={{ background: C.red, color: "#fff", opacity: !ok || busy || !count ? 0.5 : 1 }}
+          className="inline-flex items-center gap-1.5 rounded-md font-semibold px-4 py-2 text-sm"
+        >
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />} Delete {count}
+        </button>
+        <Btn tone="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setContacts, documents = [], setDocuments, issues = [], setIssues, currentUser }) {
   const [planFile, setPlanFile] = useState(meta.planFile || null);
   const [planFilePreview, setPlanFilePreview] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -2249,7 +2445,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
 
   // Adds entries built from a WhatsApp export, newest first, then (optionally)
   // runs the usual AI flag check on each one in the background.
-  const importFromWhatsApp = async (drafts, runChecks, docs = []) => {
+  const importFromWhatsApp = async (drafts, runChecks, docs = [], hiccups = []) => {
     const importId = uid();
     const entries = [];
     for (const d of drafts) {
@@ -2278,11 +2474,35 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
       await saveKey("documents", nextDocs);
     }
 
+    // Hiccups spotted in the chat → Issues tab (new ones added, matching ones updated).
+    const newIssues = [];
+    const issueUpdates = [];
+    let nextIssues = [...issues];
+    for (const h of hiccups) {
+      const steps = h.stepsTaken || "";
+      if (h.existingId && nextIssues.some((i) => i.id === h.existingId)) {
+        nextIssues = nextIssues.map((i) => {
+          if (i.id !== h.existingId) return i;
+          issueUpdates.push({ id: i.id, before: i });
+          return { ...i, status: h.status || i.status, stepsTaken: steps || i.stepsTaken || "" };
+        });
+      } else {
+        const item = { id: uid(), importId, date: h.date, issue: h.issue, stepsTaken: steps, status: h.status || "Open", raisedBy: h.raisedBy || "", source: "whatsapp" };
+        newIssues.push(item);
+        nextIssues = [item, ...nextIssues];
+      }
+    }
+    if ((newIssues.length || issueUpdates.length) && setIssues) {
+      nextIssues.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      setIssues(nextIssues);
+      await saveKey("issues", nextIssues);
+    }
+
     // Stages the chat says were finished.
     for (const d of drafts) {
       if (d.completed?.length) await markStagesAuto(d.completed, d.date, { evidence: (d.description || "").slice(0, 80), importId });
     }
-    await patchMeta((m) => ({ ...m, lastImport: { id: importId, at: new Date().toISOString(), entryIds: entries.map((e) => e.id), docIds: newDocs.map((d) => d.id) } }));
+    await patchMeta((m) => ({ ...m, lastImport: { id: importId, at: new Date().toISOString(), entryIds: entries.map((e) => e.id), docIds: newDocs.map((d) => d.id), issueIds: newIssues.map((i) => i.id), issueUpdates } }));
 
     if (runChecks) {
       for (const e of entries) {
@@ -2296,7 +2516,8 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
   const undoLastImport = async () => {
     const li = metaRef.current.lastImport;
     if (!li) return;
-    if (!window.confirm(`Undo the last WhatsApp import? This removes ${li.entryIds?.length || 0} log entries and ${li.docIds?.length || 0} documents it added.`)) return;
+    const hic = (li.issueIds?.length || 0) + (li.issueUpdates?.length || 0);
+    if (!window.confirm(`Undo the last WhatsApp import? This removes ${li.entryIds?.length || 0} log entries and ${li.docIds?.length || 0} documents it added${hic ? `, and undoes ${hic} hiccup${hic > 1 ? "s" : ""}` : ""}.`)) return;
     const ids = new Set(li.entryIds || []);
     for (const e of progressRef.current.filter((x) => ids.has(x.id))) {
       if (e.photoSlots?.length || e.extraCount) await saveKey(progressPhotoKey(e.id), null);
@@ -2311,11 +2532,46 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
       setDocuments(nextDocs);
       await saveKey("documents", nextDocs);
     }
+    if (hic && setIssues) {
+      const added = new Set(li.issueIds || []);
+      const before = Object.fromEntries((li.issueUpdates || []).map((u) => [u.id, u.before]));
+      const nextIssues = issues.filter((i) => !added.has(i.id)).map((i) => before[i.id] || i);
+      setIssues(nextIssues);
+      await saveKey("issues", nextIssues);
+    }
     await patchMeta((m) => {
       const auto = { ...(m.stageAuto || {}) };
       Object.keys(auto).forEach((k) => { if (auto[k]?.importId === li.id) delete auto[k]; });
       return { ...m, stageAuto: auto, lastImport: null };
     });
+  };
+
+  // Delete every log entry (or just the ones the filter shows), with their photos.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const deleteEntries = async (scope, resetAuto) => {
+    const doomed = scope === "shown" ? progressRef.current.filter(logFilter) : progressRef.current;
+    const ids = new Set(doomed.map((e) => e.id));
+    for (const e of doomed) {
+      if (e.photoSlots?.length || e.extraCount) await saveKey(progressPhotoKey(e.id), null);
+    }
+    const next = progressRef.current.filter((e) => !ids.has(e.id));
+    progressRef.current = next;
+    setProgress(next);
+    await saveKey("progress", next);
+    await patchMeta((m) => {
+      let auto = m.stageAuto || {};
+      if (resetAuto) {
+        auto = { ...auto };
+        const importIds = new Set(doomed.map((e) => e.importId).filter(Boolean));
+        Object.keys(auto).forEach((k) => {
+          const a = auto[k] || {};
+          if (scope === "all" || ids.has(a.entryId) || (a.importId && importIds.has(a.importId))) delete auto[k];
+        });
+      }
+      const li = m.lastImport ? { ...m.lastImport, entryIds: (m.lastImport.entryIds || []).filter((id) => !ids.has(id)) } : null;
+      return { ...m, stageAuto: auto, lastImport: li };
+    });
+    setDeleteOpen(false);
   };
 
   const saveEdit = (initial, updateItem) => async (vals, photos) => {
@@ -2627,7 +2883,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
 
       <WhatsAppImport
         progress={progress} onImport={importFromWhatsApp} contacts={contacts} setContacts={setContacts}
-        stages={stages} documents={documents} lastImport={meta.lastImport} onUndo={undoLastImport}
+        stages={stages} documents={documents} issues={issues} lastImport={meta.lastImport} onUndo={undoLastImport}
       />
 
       <ListSection
@@ -2696,6 +2952,17 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
               <span style={{ color: C.concrete }} className="text-xs ml-auto">
                 {logFiltered ? `Showing ${logMatches} of ${progress.length} entries` : `${progress.length} entries · ${loggedDates.length} days logged`}
                 {logFiltered && <button onClick={clearLogFilter} style={{ color: C.navy }} className="underline ml-2">Clear</button>}
+                <button onClick={() => setDeleteOpen(true)} style={{ color: C.red }} className="underline ml-3 inline-flex items-center gap-1">
+                  <Trash2 size={12} /> {logFiltered ? "Delete…" : "Delete all"}
+                </button>
+                {deleteOpen && (
+                  <DeleteEntriesDialog
+                    total={progress.length}
+                    shown={logFiltered ? logMatches : 0}
+                    onCancel={() => setDeleteOpen(false)}
+                    onDelete={deleteEntries}
+                  />
+                )}
               </span>
             </div>
           </div>
@@ -2704,7 +2971,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
           initial
             ? <ProgressEntryForm key={initial.id} initial={initial} stages={stages} onSave={saveEdit(initial, updateItem)} />
             : <ProgressEntryForm stages={stages} onSave={saveEntry(addItem)} />}
-        onRemoveItem={(item) => item.photoSlots?.length && saveKey(progressPhotoKey(item.id), null)}
+        onRemoveItem={(item) => (item.photoSlots?.length || item.extraCount) && saveKey(progressPhotoKey(item.id), null)}
         renderCard={(p) => <ProgressCard entry={p} onRecheck={runReview} />}
       />
     </div>
@@ -4139,7 +4406,7 @@ function IssuesTab({ issues, setIssues }) {
     <ListSection
       icon={AlertTriangle}
       title="Hiccups &amp; resolutions"
-      subtitle="Every problem, and what fixed it"
+      subtitle="Every problem, and what fixed it — WhatsApp imports (Progress tab) add these automatically"
       schema={issueSchema}
       items={issues}
       setItems={setIssues}
@@ -4153,6 +4420,11 @@ function IssuesTab({ issues, setIssues }) {
           </div>
           <p style={{ color: C.ink }} className="text-sm font-semibold">{i.issue}</p>
           {i.stepsTaken && <p style={{ color: C.concrete }} className="text-sm mt-1">→ {i.stepsTaken}</p>}
+          {(i.source === "whatsapp" || i.raisedBy) && (
+            <p style={{ color: C.concrete }} className="text-xs mt-1.5">
+              {i.source === "whatsapp" ? "Found in WhatsApp chat" : ""}{i.source === "whatsapp" && i.raisedBy ? " · " : ""}{i.raisedBy ? `raised by ${i.raisedBy}` : ""}
+            </p>
+          )}
         </div>
       )}
     />
@@ -4468,7 +4740,8 @@ export default function App({ currentUser, onSignOut, onSwitchProject }) {
         {tab === "progress" && (
           <ProgressTab
             progress={progress} setProgress={setProgress} meta={meta} setMeta={setMeta}
-            contacts={contacts} setContacts={setContacts} documents={documents} setDocuments={setDocuments} currentUser={currentUser}
+            contacts={contacts} setContacts={setContacts} documents={documents} setDocuments={setDocuments}
+            issues={issues} setIssues={setIssues} currentUser={currentUser}
           />
         )}
         {tab === "gallery" && (
