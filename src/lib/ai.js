@@ -5,12 +5,33 @@
 //
 // See /api/ai.js for the server-side implementation.
 
+// "Failed to fetch" / "Load failed" = the request never got an answer (Wi-Fi
+// blip, laptop napping, server restarting). Worth a couple of quiet retries.
+const isNetworkError = (e) => e instanceof TypeError || /failed to fetch|load failed|networkerror|network request failed/i.test(e?.message || "");
+
 export async function askClaude({ text, images = [], useSearch = false }) {
-  const res = await fetch("/api/ai", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, images, useSearch }),
-  });
+  const body = JSON.stringify({ text, images, useSearch });
+  const waits = [3000, 8000];
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch("/api/ai", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+      // Vercel's own timeout / gateway hiccups — also worth one more try.
+      if ((res.status === 502 || res.status === 504) && attempt < waits.length) {
+        const peek = await res.clone().text().catch(() => "");
+        if (res.status === 504 || /high demand|overloaded|unavailable|try again/i.test(peek)) {
+          await new Promise((r) => setTimeout(r, waits[attempt]));
+          continue;
+        }
+      }
+      break;
+    } catch (e) {
+      if (attempt >= waits.length || !isNetworkError(e)) {
+        throw new Error(isNetworkError(e) ? "Couldn't reach the AI service (network connection dropped). Check your internet and try again." : e.message);
+      }
+      await new Promise((r) => setTimeout(r, waits[attempt]));
+    }
+  }
   if (!res.ok) {
     let detail = "";
     try {

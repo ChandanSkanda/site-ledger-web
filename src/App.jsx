@@ -1676,7 +1676,7 @@ async function findWhatsAppHiccups(days, contacts = [], existing = [], onStep = 
   }));
   if (!lines.length) return [];
   // Split long chats into chunks of whole days.
-  const CHUNK = 60000;
+  const CHUNK = 30000; // smaller pieces answer faster and fail less
   const chunks = [];
   let cur = [];
   let size = 0;
@@ -1689,6 +1689,7 @@ async function findWhatsAppHiccups(days, contacts = [], existing = [], onStep = 
 
   const known = existing.slice(0, 60).map((i) => `- id ${i.id} (${i.date}, ${i.status || "Open"}): ${String(i.issue || "").slice(0, 200)}`).join("\n");
   const found = [];
+  const errors = [];
   for (let c = 0; c < chunks.length; c++) {
     onStep(chunks.length > 1 ? `Looking for hiccups (part ${c + 1} of ${chunks.length})…` : "Looking for hiccups in the conversation…");
     const text = `These are messages from a WhatsApp group for a house being built in Bangalore, India. The homeowner lives abroad; the builder, site engineer and supervisor post updates. Each sender's role is in brackets where known.
@@ -1714,9 +1715,15 @@ Reply with ONLY a JSON object:
 - "raisedBy": who raised it (name/role as shown).
 - "existingId": the id of a matching already-logged hiccup, or "".
 Return {"hiccups":[]} if there are none.`;
-    const out = await askClaude({ text });
     let r;
-    try { r = parseJsonLoose(out); } catch { r = { hiccups: [] }; }
+    try {
+      const out = await askClaude({ text });
+      try { r = parseJsonLoose(out); } catch { r = { hiccups: [] }; }
+    } catch (err) {
+      errors.push(err);
+      if (errors.length === chunks.length) throw err; // nothing worked at all
+      continue;
+    }
     (Array.isArray(r.hiccups) ? r.hiccups : []).forEach((h) => {
       const issue = String(h.issue || "").trim();
       if (!issue) return;
@@ -1732,7 +1739,10 @@ Return {"hiccups":[]} if there are none.`;
     });
     if (c < chunks.length - 1) await new Promise((r2) => setTimeout(r2, 800));
   }
-  return found.sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = found.sort((a, b) => a.date.localeCompare(b.date));
+  sorted.failedParts = errors.length;
+  sorted.totalParts = chunks.length;
+  return sorted;
 }
 
 // Guess a document type from its file name (you can change it before importing).
@@ -1772,7 +1782,11 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
 
   // Hiccups: read the whole conversation for the chosen days (every sender —
   // the homeowner's own objections count too).
+  const [hiccupBusy, setHiccupBusy] = useState(false);
+  const [hiccupDates, setHiccupDates] = useState([]);
   const scanHiccups = async (dates) => {
+    setHiccupDates(dates);
+    setHiccupBusy(true);
     const set = new Set(dates);
     const days = (data?.days || []).filter((d) => set.has(d.date));
     setHiccupNote("");
@@ -1785,11 +1799,14 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
         return !ex || h.status !== (ex.status || "Open") || (h.stepsTaken && !ex.stepsTaken);
       };
       setHiccups(found.map((h, i) => ({ ...h, key: i, include: !h.existingId || addsInfo(h) })));
-      setHiccupNote(found.length ? "" : "No hiccups found in these days.");
+      setHiccupNote(found.failedParts
+        ? `Couldn't read ${found.failedParts} of ${found.totalParts} parts of the chat — some hiccups may be missing.`
+        : found.length ? "" : "No hiccups found in these days.");
     } catch (err) {
       console.error("[SiteLedger] Hiccup scan failed", err);
-      setHiccupNote(`Couldn't look for hiccups: ${err.message || "AI error"}. You can still import the log entries.`);
+      setHiccupNote(`Couldn't look for hiccups: ${String(err.message || "AI error").replace(/\.$/, "")}. You can still import the log entries.`);
     }
+    setHiccupBusy(false);
   };
   const hiccupsOnly = async () => {
     stopRef.current = false;
@@ -1861,8 +1878,18 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
     const out = [];
     for (let i = 0; i < days.length; i++) {
       if (stopRef.current) break;
-      const day = days[i];
-      setStatus(`Reading ${day.date} (${i + 1} of ${days.length})…`);
+      out.push(await readOneDay(days[i], `${i + 1} of ${days.length}`));
+      setDrafts([...out]);
+      await new Promise((r) => setTimeout(r, 800)); // be gentle with the free AI quota
+    }
+    if (findHiccups && !stopRef.current) await scanHiccups(days.map((d) => d.date));
+    setStep("review");
+  };
+
+  // One day → one draft log entry (AI summary + the photos worth keeping).
+  const readOneDay = async (day, label) => {
+    {
+      setStatus(`Reading ${day.date} (${label})…`);
       // All photos posted that day, with who sent them and when.
       const all = day.messages.flatMap((m) => m.photos.map((name) => ({ name, time: m.time, sender: m.sender })));
       const sampled = sampleEvenly(all, MAX_THUMBS).map((idx) => all[idx]);
@@ -1871,7 +1898,7 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
         const blob = await data.getPhoto(ph.name);
         if (blob) thumbs.push({ ...ph, data: await blobToBase64Jpeg(blob, 480, 0.6) });
       }
-      if (thumbs.length) setStatus(`Reading ${day.date} (${i + 1} of ${days.length}) — AI is sorting ${all.length} photo${all.length > 1 ? "s" : ""}…`);
+      if (thumbs.length) setStatus(`Reading ${day.date} (${label}) — AI is sorting ${all.length} photo${all.length > 1 ? "s" : ""}…`);
       let summary;
       try {
         summary = await summariseWhatsAppDay(day, thumbs, contacts, stages);
@@ -1881,7 +1908,7 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
           relevant: true, stage: "Other",
           description: day.messages.map((m) => m.text).filter(Boolean).join(" · ").slice(0, 300), workersCount: "",
           pick: { start: thumbs.length ? 0 : null, end: thumbs.length > 1 ? thumbs.length - 1 : null, keep: [] }, // fall back to first + last
-          failed: busy ? "AI busy — filled from the raw messages, first and last photo kept" : "AI couldn't read this day — filled from the raw messages, first and last photo kept",
+          failed: busy ? "AI busy — filled from the raw messages, first and last photo kept" : `AI couldn't read this day (${err?.message || "error"}) — filled from the raw messages, first and last photo kept`,
         };
       }
       // Load full-size versions of just the photos worth keeping.
@@ -1898,13 +1925,25 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
       const keptCount = (st ? 1 : 0) + (en ? 1 : 0) + photos.extra.length;
       summary.photoNote = all.length ? `${all.length} photo${all.length > 1 ? "s" : ""} → kept ${keptCount}${summary.skipped ? ` (skipped: ${summary.skipped})` : all.length > keptCount ? ` (${all.length - keptCount} skipped)` : ""}${all.length > thumbs.length ? ` · AI looked at ${thumbs.length}` : ""}` : "";
       const reporters = [...new Set(day.messages.map((m) => senderLabel(m.sender, contacts)))];
-      out.push({ date: day.date, ...summary, photos, include: summary.relevant, messageCount: day.messages.length, reportedBy: reporters.join(", ") });
-      setDrafts([...out]);
-      await new Promise((r) => setTimeout(r, 800)); // be gentle with the free AI quota
+      return { date: day.date, ...summary, photos, include: summary.relevant, messageCount: day.messages.length, reportedBy: reporters.join(", ") };
     }
-    if (findHiccups && !stopRef.current) await scanHiccups(days.map((d) => d.date));
-    setStep("review");
   };
+
+  // Re-run the AI on days it couldn't read the first time.
+  const [retrying, setRetrying] = useState(false);
+  const retryDays = async (dates) => {
+    setRetrying(true);
+    const want = new Set(dates);
+    const days = daysForSenders().filter((d) => want.has(d.date));
+    for (let i = 0; i < days.length; i++) {
+      const fresh = await readOneDay(days[i], `retry ${i + 1} of ${days.length}`);
+      setDrafts((ds) => ds.map((d) => (d.date === fresh.date ? { ...fresh, include: d.include } : d)));
+      if (i < days.length - 1) await new Promise((r) => setTimeout(r, 800));
+    }
+    setStatus("");
+    setRetrying(false);
+  };
+  const failedDates = drafts.filter((d) => d.failed).map((d) => d.date);
 
   const selectedDocs = () => (data?.docs || []).filter((d) => pickedDocs[d.name]?.include);
   const readDocs = async () => {
@@ -1917,12 +1956,22 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
     }
     return out;
   };
+  const [importError, setImportError] = useState("");
   const doImport = async () => {
     setImporting(true);
-    const docs = await readDocs();
-    await onImport(drafts.filter((d) => d.include), runChecks, docs, hiccups.filter((h) => h.include));
-    setImporting(false);
-    close();
+    setImportError("");
+    try {
+      setStatus("Reading documents from the export…");
+      const docs = await readDocs();
+      await onImport(drafts.filter((d) => d.include), runChecks, docs, hiccups.filter((h) => h.include), setStatus);
+      setImporting(false);
+      setStatus("");
+      close();
+    } catch (err) {
+      console.error("[SiteLedger] Import failed", err);
+      setImporting(false);
+      setImportError(`Import stopped: ${err?.message || "unknown error"}. Check your connection and press Import again.`);
+    }
   };
   const importDocsOnly = async () => {
     setImporting(true);
@@ -2136,16 +2185,31 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
                         <textarea style={{ ...inputStyle, minHeight: 54, fontSize: 13 }} className="sm:col-span-3" value={d.description} onChange={(e) => setDraft(idx, { description: e.target.value })} />
                       </div>
                     </div>
-                    {d.failed && <p style={{ color: C.yellow }} className="text-xs mt-1">{d.failed}</p>}
+                    {d.failed && (
+                      <p style={{ color: C.yellow }} className="text-xs mt-1">
+                        {d.failed}{" "}
+                        {step === "review" && !retrying && (
+                          <button onClick={() => retryDays([d.date])} style={{ color: C.navy }} className="underline font-semibold">Try AI again</button>
+                        )}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
-              {(hiccups.length > 0 || hiccupNote) && (
+              {(hiccups.length > 0 || hiccupNote || (hiccupBusy && step === "review")) && (
                 <div className="mb-4">
                   <div style={{ color: C.concrete }} className="text-xs uppercase font-semibold tracking-wide mb-1 flex items-center gap-1.5">
                     <AlertTriangle size={13} /> Hiccups found → Issues tab
                   </div>
-                  {hiccupNote && <p style={{ color: C.concrete }} className="text-xs mb-2">{hiccupNote}</p>}
+                  {hiccupNote && (
+                    <p style={{ color: C.concrete }} className="text-xs mb-2">
+                      {hiccupNote}{" "}
+                      {step === "review" && !hiccupBusy && /couldn't/i.test(hiccupNote) && (
+                        <button onClick={() => scanHiccups(hiccupDates)} style={{ color: C.navy }} className="underline font-semibold">Look again</button>
+                      )}
+                    </p>
+                  )}
+                  {hiccupBusy && step === "review" && <p style={{ color: C.ink }} className="text-xs mb-2 flex items-center gap-2"><Loader2 size={13} className="animate-spin" /> {status}</p>}
                   <div className="space-y-2">
                     {hiccups.map((h) => {
                       const ex = h.existingId ? issues.find((i) => i.id === h.existingId) : null;
@@ -2175,10 +2239,24 @@ function WhatsAppImport({ progress, onImport, contacts = [], setContacts, stages
                   </div>
                 </div>
               )}
+              {step === "review" && (failedDates.length > 0 || retrying) && (
+                <div style={{ background: "#FFF8E6", border: `1px solid ${C.yellow}` }} className="rounded-md p-3 mb-3 text-xs flex items-center gap-3 flex-wrap">
+                  {retrying ? (
+                    <span className="flex items-center gap-2"><Loader2 size={13} className="animate-spin" /> {status}</span>
+                  ) : (
+                    <>
+                      <span style={{ color: C.ink }}>The AI couldn't read {failedDates.length} {failedDates.length === 1 ? "day" : "days"} (usually a busy AI or a dropped connection).</span>
+                      <Btn small onClick={() => retryDays(failedDates)}><RotateCcw size={12} /> Try those {failedDates.length === 1 ? "day" : "days"} again</Btn>
+                    </>
+                  )}
+                </div>
+              )}
               {step === "review" && (
                 <div className="flex items-center gap-4 flex-wrap">
+                  {importing && status && <span style={{ color: C.ink }} className="text-xs w-full flex items-center gap-2"><Loader2 size={13} className="animate-spin" /> {status}</span>}
+                  {importError && <span style={{ color: C.red }} className="text-xs w-full">{importError}</span>}
                   {selectedDocs().length > 0 && <span style={{ color: C.concrete }} className="text-xs w-full">Also saving {selectedDocs().length} document(s) to Documents.</span>}
-                  <Btn onClick={doImport} disabled={importing || (!drafts.some((d) => d.include) && !selectedDocs().length && !pickedHiccups)}>
+                  <Btn onClick={doImport} disabled={importing || retrying || hiccupBusy || (!drafts.some((d) => d.include) && !selectedDocs().length && !pickedHiccups)}>
                     {importing ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
                     Import {[
                       drafts.length ? `${drafts.filter((d) => d.include).length} ${drafts.filter((d) => d.include).length === 1 ? "entry" : "entries"}` : "",
@@ -2445,16 +2523,18 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
 
   // Adds entries built from a WhatsApp export, newest first, then (optionally)
   // runs the usual AI flag check on each one in the background.
-  const importFromWhatsApp = async (drafts, runChecks, docs = [], hiccups = []) => {
+  const importFromWhatsApp = async (drafts, runChecks, docs = [], hiccups = [], onStep = () => {}) => {
     const importId = uid();
     const entries = [];
-    for (const d of drafts) {
+    for (const [n, d] of drafts.entries()) {
+      onStep(`Saving photos for ${d.date} (${n + 1} of ${drafts.length})…`);
       const id = uid();
       const photoSlots = PHOTO_SLOTS.filter((s) => d.photos[s.key]).map((s) => s.key);
       const extraCount = (d.photos.extra || []).length;
       if (photoSlots.length || extraCount) await saveKey(progressPhotoKey(id), d.photos);
       entries.push({ id, importId, date: d.date, extraCount, stage: d.stage, workersCount: d.workersCount, description: d.description, photoSlots, flag: runChecks ? "Checking" : "", flagReason: "", source: "whatsapp", reportedBy: d.reportedBy || "" });
     }
+    onStep("Saving the daily log…");
     if (entries.length) {
       const next = [...entries, ...progressRef.current].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
       progressRef.current = next;
@@ -2469,6 +2549,7 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
       uploadedBy: currentUser?.id || null, uploadedByName: currentUser?.name || currentUser?.email || "", source: "whatsapp",
     }));
     if (newDocs.length && setDocuments) {
+      onStep(`Saving ${newDocs.length} document${newDocs.length > 1 ? "s" : ""}…`);
       const nextDocs = [...newDocs, ...documents];
       setDocuments(nextDocs);
       await saveKey("documents", nextDocs);
@@ -2504,11 +2585,19 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
     }
     await patchMeta((m) => ({ ...m, lastImport: { id: importId, at: new Date().toISOString(), entryIds: entries.map((e) => e.id), docIds: newDocs.map((d) => d.id), issueIds: newIssues.map((i) => i.id), issueUpdates } }));
 
-    if (runChecks) {
-      for (const e of entries) {
-        await runReview(e, drafts.find((d) => d.date === e.date)?.photos);
-      }
+    // AI checks run in the background — the import window closes straight
+    // away and a banner shows how far the checks have got.
+    if (runChecks && entries.length) runBackgroundChecks(entries.map((e) => ({ entry: e, photos: drafts.find((d) => d.date === e.date)?.photos })));
+  };
+
+  const [bgCheck, setBgCheck] = useState(null); // { done, total }
+  const runBackgroundChecks = async (jobs) => {
+    setBgCheck({ done: 0, total: jobs.length });
+    for (let i = 0; i < jobs.length; i++) {
+      await runReview(jobs[i].entry, jobs[i].photos);
+      setBgCheck({ done: i + 1, total: jobs.length });
     }
+    setTimeout(() => setBgCheck(null), 4000);
   };
 
   // Removes everything the last WhatsApp import added (entries, their photos,
@@ -2881,6 +2970,26 @@ function ProgressTab({ progress, setProgress, meta, setMeta, contacts = [], setC
         {meta.planReview && <PlanReport report={meta.planReview} />}
       </div>
 
+      {!bgCheck && progress.some((p) => p.flag === "Checking") && (
+        <div style={{ background: "#FFF8E6", border: `1px solid ${C.yellow}` }} className="rounded-md px-3 py-2 mb-4 text-xs flex items-center gap-3 flex-wrap">
+          <span style={{ color: C.ink }}>
+            {progress.filter((p) => p.flag === "Checking").length} log entries still say “Checking” — their AI check was interrupted (the tab was closed or the connection dropped).
+          </span>
+          <Btn small onClick={() => runBackgroundChecks(progress.filter((p) => p.flag === "Checking").map((entry) => ({ entry })))}>
+            <Sparkles size={12} /> Check them now
+          </Btn>
+        </div>
+      )}
+      {bgCheck && (
+        <div style={{ background: "#fff", border: `1px solid ${C.line}` }} className="rounded-md px-3 py-2 mb-4 text-xs flex items-center gap-2">
+          {bgCheck.done < bgCheck.total ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} style={{ color: C.green }} />}
+          <span style={{ color: C.ink }}>
+            {bgCheck.done < bgCheck.total
+              ? `AI is checking the imported entries — ${bgCheck.done} of ${bgCheck.total} done. You can keep using the app; keep this tab open.`
+              : `AI checks finished for all ${bgCheck.total} imported entries.`}
+          </span>
+        </div>
+      )}
       <WhatsAppImport
         progress={progress} onImport={importFromWhatsApp} contacts={contacts} setContacts={setContacts}
         stages={stages} documents={documents} issues={issues} lastImport={meta.lastImport} onUndo={undoLastImport}
